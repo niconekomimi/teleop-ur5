@@ -1,5 +1,6 @@
 -i https://mirrors.aliyun.com/pypi/simple/
 
+pynput
 mediapipe==0.10.9
 depthai
 h5py
