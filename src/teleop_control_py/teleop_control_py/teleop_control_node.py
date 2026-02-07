@@ -73,29 +73,19 @@ class TeleopControlNode(Node):
         self.declare_parameter("scale_factor", 0.5)
         self.declare_parameter("axis_mapping", [0, 1, 2])
         self.declare_parameter("smoothing_alpha", 0.2)
-        self.declare_parameter("pinch_threshold_px", 45.0)
         self.declare_parameter("gripper_open_dist_px", 100.0)
         self.declare_parameter("gripper_close_dist_px", 20.0)
         self.declare_parameter("gripper_open_dist_m", 0.12)
         self.declare_parameter("gripper_close_dist_m", 0.03)
         self.declare_parameter("depth_unit_scale", 0.001)  # 16UC1 in mm -> m
         self.declare_parameter("hand_position_source", "hybrid")  # depth|normalized|hybrid
-        # If true (recommended), compute hand X/Y using a fixed reference depth so that
-        # moving the hand closer/farther mostly changes Z without introducing X/Y coupling
-        # from perspective projection.
-        self.declare_parameter("decouple_xy_from_depth", True)
         self.declare_parameter("depth_min_m", 0.1)
         self.declare_parameter("depth_max_m", 2.0)
-        self.declare_parameter("use_pinch_deadman", False)
         # Keyboard deadman input backend:
         # - opencv: uses cv2.waitKey() events (can miss key-up; not ideal for true "hold")
         # - pynput: tracks press/release reliably (recommended for immediate stop)
         self.declare_parameter("space_deadman_backend", "opencv")  # opencv|pynput
-        # Keyboard deadman modes:
-        # - latch: treat space as a short latch window extended by key repeats (good if window focused)
-        # - toggle: press space to toggle deadman on/off (robust if key repeats are unreliable)
-        self.declare_parameter("space_deadman_mode", "latch")  # latch|toggle
-        self.declare_parameter("space_deadman_toggle_debounce_sec", 0.5)
+        # opencv backend uses a latch window extended by key repeats
         self.declare_parameter("space_deadman_hold_sec", 0.3)
 
         # Deadman filtering: avoid flicker without adding noticeable stop latency.
@@ -120,9 +110,6 @@ class TeleopControlNode(Node):
             self.get_parameter("axis_mapping").get_parameter_value().integer_array_value
         )
         smoothing_alpha = float(self.get_parameter("smoothing_alpha").get_parameter_value().double_value)
-        self.pinch_threshold_px = float(
-            self.get_parameter("pinch_threshold_px").get_parameter_value().double_value
-        )
         self.gripper_open_dist_px = float(
             self.get_parameter("gripper_open_dist_px").get_parameter_value().double_value
         )
@@ -141,29 +128,14 @@ class TeleopControlNode(Node):
         self.hand_position_source = (
             self.get_parameter("hand_position_source").get_parameter_value().string_value.strip().lower()
         )
-        self.decouple_xy_from_depth = bool(
-            self.get_parameter("decouple_xy_from_depth").get_parameter_value().bool_value
-        )
         self.depth_min_m = float(self.get_parameter("depth_min_m").get_parameter_value().double_value)
         self.depth_max_m = float(self.get_parameter("depth_max_m").get_parameter_value().double_value)
-        self.use_pinch_deadman = bool(
-            self.get_parameter("use_pinch_deadman").get_parameter_value().bool_value
-        )
         self.space_deadman_backend = (
             self.get_parameter("space_deadman_backend").get_parameter_value().string_value.strip().lower()
         )
         if self.space_deadman_backend not in {"opencv", "pynput"}:
             self.get_logger().warn("space_deadman_backend must be 'opencv' or 'pynput'; falling back to 'opencv'")
             self.space_deadman_backend = "opencv"
-        self.space_deadman_mode = (
-            self.get_parameter("space_deadman_mode").get_parameter_value().string_value.strip().lower()
-        )
-        if self.space_deadman_mode not in {"latch", "toggle"}:
-            self.get_logger().warn("space_deadman_mode must be 'latch' or 'toggle'; falling back to 'latch'")
-            self.space_deadman_mode = "latch"
-        self.space_deadman_toggle_debounce_sec = float(
-            self.get_parameter("space_deadman_toggle_debounce_sec").get_parameter_value().double_value
-        )
         self.space_deadman_hold_sec = float(
             self.get_parameter("space_deadman_hold_sec").get_parameter_value().double_value
         )
@@ -188,9 +160,6 @@ class TeleopControlNode(Node):
         self.gripper_speed_ratio = float(
             self.get_parameter("gripper_speed_ratio").get_parameter_value().double_value
         )
-
-        # State for depth-based XY decoupling
-        self._depth_xy_ref_m: Optional[float] = None
 
         # ROS interfaces
         self.bridge = CvBridge()
@@ -225,8 +194,6 @@ class TeleopControlNode(Node):
         self.initial_robot_orientation: Optional[np.ndarray] = None  # 4-vector
         self.deadman_active = False
         self._space_deadman_until_ns: int = 0
-        self._space_deadman_toggled: bool = False
-        self._last_space_toggle_ns: int = 0
         self._space_down: bool = False
         self._keyboard_listener = None
         self._deadman_filtered: bool = False
@@ -267,7 +234,7 @@ class TeleopControlNode(Node):
                 self.get_logger().warn(f"Failed to start pynput keyboard listener; falling back to opencv. Err: {exc}")
                 self.space_deadman_backend = "opencv"
 
-        self.get_logger().info("TeleopControlNode ready. Hold pinch or space to move.")
+        self.get_logger().info("TeleopControlNode ready. Hold space to move.")
 
     def destroy_node(self):  # type: ignore[override]
         try:
@@ -336,18 +303,14 @@ class TeleopControlNode(Node):
             index_tip = hand_landmarks.landmark[8]
 
             wrist_pos, wrist_source = self._get_hand_position(wrist, width, height)
-            deadman_gesture = self._is_pinch(thumb_tip, index_tip, width, height)
             now_ns = self.get_clock().now().nanoseconds
 
             if self.space_deadman_backend == "pynput":
                 key_deadman = self._space_down
             else:
-                if self.space_deadman_mode == "toggle":
-                    key_deadman = self._space_deadman_toggled
-                else:
-                    key_deadman = now_ns < self._space_deadman_until_ns
+                key_deadman = now_ns < self._space_deadman_until_ns
 
-            desired_deadman = bool(key_deadman or (self.use_pinch_deadman and deadman_gesture))
+            desired_deadman = bool(key_deadman)
             deadman = self._deadman_filter(desired_deadman, now_ns)
 
             # Gripper command from pinch distance (prefers metric if depth+info available)
@@ -363,8 +326,6 @@ class TeleopControlNode(Node):
                     self.initial_robot_orientation = self._orientation_to_array(
                         self.latest_robot_pose.orientation
                     )
-                    # Lock a reference depth so hand Z motion doesn't scale X/Y (perspective coupling)
-                    self._depth_xy_ref_m = float(wrist_pos[2]) if wrist_source == "DEPTH" else None
                     self.pos_filter.reset(self.initial_robot_pos.copy())
                     self.deadman_active = True
                     self.get_logger().info("Deadman engaged; starting relative control")
@@ -382,7 +343,6 @@ class TeleopControlNode(Node):
                     self.get_logger().info("Deadman released; holding position")
                 self.deadman_active = False
                 self.initial_hand_pos = None
-                self._depth_xy_ref_m = None
                 if self.latest_robot_pose is not None:
                     # Hold position by re-publishing the latest pose
                     hold_pose = PoseStamped()
@@ -407,7 +367,6 @@ class TeleopControlNode(Node):
                 self.get_logger().info("Hand lost; stopping motion")
             self.deadman_active = False
             self.initial_hand_pos = None
-            self._depth_xy_ref_m = None
 
         cv2.putText(
             cv_image,
@@ -424,15 +383,9 @@ class TeleopControlNode(Node):
         key = cv2.waitKey(1) & 0xFF
         if self.space_deadman_backend == "opencv" and key == 32:  # space
             now_ns = self.get_clock().now().nanoseconds
-            if self.space_deadman_mode == "toggle":
-                debounce_ns = int(max(0.0, self.space_deadman_toggle_debounce_sec) * 1e9)
-                if now_ns - self._last_space_toggle_ns >= debounce_ns:
-                    self._space_deadman_toggled = not self._space_deadman_toggled
-                    self._last_space_toggle_ns = now_ns
-            else:
-                # latch window extended by key repeats
-                hold_ns = int(max(0.0, self.space_deadman_hold_sec) * 1e9)
-                self._space_deadman_until_ns = now_ns + hold_ns
+            # latch window extended by key repeats
+            hold_ns = int(max(0.0, self.space_deadman_hold_sec) * 1e9)
+            self._space_deadman_until_ns = now_ns + hold_ns
 
     def _get_hand_position(self, wrist_landmark, width: int, height: int) -> Tuple[Optional[np.ndarray], str]:
         """Return hand position vector for relative control.
@@ -449,23 +402,11 @@ class TeleopControlNode(Node):
         if source in {"depth", "hybrid"}:
             p3d = self._landmark_3d_m(wrist_landmark, width, height)
             if p3d is not None:
-                if self.decouple_xy_from_depth and self._depth_xy_ref_m is not None and p3d[2] > 1e-6:
-                    # Replace X/Y with values computed at the reference depth.
-                    # This removes the x=(u-cx)*z/fx scaling effect when z changes.
-                    u, v = self._landmark_px(wrist_landmark, width, height)
-                    z_ref = float(self._depth_xy_ref_m)
-                    x_ref = (u - self.cx) * z_ref / self.fx
-                    y_ref = (v - self.cy) * z_ref / self.fy
-                    p3d = np.array([x_ref, y_ref, float(p3d[2])], dtype=np.float32)
                 return p3d.astype(np.float32), "DEPTH"
             if source == "depth":
                 return None, "DEPTH_NONE"
 
         return np.array([wrist_landmark.x, wrist_landmark.y, wrist_landmark.z], dtype=np.float32), "NORM"
-
-    def _is_pinch(self, thumb_tip, index_tip, width: int, height: int) -> bool:
-        dist = self._distance_px(thumb_tip, index_tip, width, height)
-        return dist < self.pinch_threshold_px
 
     def _gripper_from_distance(self, thumb_tip, index_tip, width: int, height: int) -> float:
         dist_m = self._physical_distance_m(thumb_tip, index_tip, width, height)

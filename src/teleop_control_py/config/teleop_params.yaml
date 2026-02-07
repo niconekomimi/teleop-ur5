@@ -10,12 +10,11 @@ teleop_control_node:
     gripper_cmd_topic: "/gripper/cmd"
 
     # 手 -> 机器人调节
-    scale_factor: 0.6          # 稍微调大一点灵敏度
+    scale_factor: 1.0          # 小范围动作更跟手（同样手位移产生更大目标位移）
     axis_mapping: [0, 1, 2]    # 默认映射
 
     # 滤波与检测
-    smoothing_alpha: 0.3       # 稍微调大以减少延迟
-    pinch_threshold_px: 45.0
+    smoothing_alpha: 0.6       # 更跟手（更小滞后），抖动会略增
 
     # 夹爪配置
     gripper_open_dist_px: 100.0
@@ -24,24 +23,19 @@ teleop_control_node:
     gripper_close_dist_m: 0.02
     depth_unit_scale: 0.001
     # 严格 3D：只用深度反投影得到相机坐标系下的真实 XYZ（米）。
-    # 这样手仅改变 Z 时，反投影得到的 X/Y 不会跟着变（透视效应会被数学抵消）。
+    # 这通常能显著减少“前后移动导致 XY 跟着漂”的视觉耦合（因为像素 u/v 会随深度变化而变化）。
     hand_position_source: "depth"
-    # 仅在你想“固定参考深度算 XY”的场景才开；严格 3D 建议关闭。
-    decouple_xy_from_depth: false
     depth_min_m: 0.10
     depth_max_m: 2.00
     
     # Deadman 开关
-    use_pinch_deadman: false
     # 空格 deadman：用 pynput 可以真正检测“按住/松开”，松开即可立即停，不会因 waitKey 丢帧而抖动
     space_deadman_backend: "pynput"  # pynput|opencv
-    space_deadman_mode: "latch"      # 仅 opencv backend 使用
     space_deadman_hold_sec: 0.10      # 仅 opencv backend 使用（越小越及时停，但更依赖按键重复）
-    space_deadman_toggle_debounce_sec: 0.5
 
     # Deadman 滤波：防抖但保持及时停
     deadman_filter_enabled: true
-    deadman_engage_confirm_sec: 0.10
+    deadman_engage_confirm_sec: 0.03
     deadman_release_confirm_sec: 0.03
     gripper_requires_deadman: true
 
@@ -53,12 +47,12 @@ servo_pose_follower:
     ee_frame: "tool0"
     
     # PID 增益 (速度控制下可以适当激进一点)
-    linear_gain: 2.0
-    angular_gain: 1.5
-    max_linear_speed: 0.5      # m/s
+    linear_gain: 5.0
+    angular_gain: 2.5
+    max_linear_speed: 0.6      # m/s
     max_angular_speed: 1.5     # rad/s
-    position_deadband: 0.002
-    rotation_deadband: 0.01
+    position_deadband: 0.0005
+    rotation_deadband: 0.005
     command_rate_hz: 100.0
 
     # 自动启动 Servo 逻辑 (你的核心需求)
@@ -68,13 +62,7 @@ servo_pose_follower:
     # 自动切换控制器逻辑 (你的核心需求)
     auto_switch_controllers: true
     controller_manager_ns: "/controller_manager"
-    # 注意：UR 的 MoveIt Servo 默认配置（ur_moveit_config/config/ur_servo.yaml）
-    # command_out_topic 指向 /forward_position_controller/commands。
-    # 因此这里需要激活 forward_position_controller，否则 Servo 的输出没人接收，机器人不会动。
     activate_controller: "forward_position_controller"
-    deactivate_controllers: ["scaled_joint_trajectory_controller", "forward_velocity_controller"]
+    deactivate_controllers: ["scaled_joint_trajectory_controller"]
     switch_strictness: "best_effort"
     startup_retry_period_sec: 1.0
-
-    # 关闭不需要的兜底逻辑
-    fallback_bridge_to_scaled_jtc: false

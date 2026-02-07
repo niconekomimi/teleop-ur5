@@ -86,7 +86,7 @@ class ServoPoseFollower(Node):
         self.declare_parameter("activate_controller", "forward_position_controller")
         self.declare_parameter(
             "deactivate_controllers",
-            ["scaled_joint_trajectory_controller", "forward_velocity_controller"],
+            ["scaled_joint_trajectory_controller"],
         )
         self.declare_parameter("switch_strictness", "best_effort")
         self.declare_parameter("startup_retry_period_sec", 1.0)
@@ -211,9 +211,22 @@ class ServoPoseFollower(Node):
                 try:
                     res = fut.result()
                     to_deactivate = set(self.deactivate_controllers)
-                    # 如果有其他轨迹控制器在运行，也把它们关掉
+                    # 自动停用与目标控制器冲突的“关节命令控制器”（位置/速度/轨迹）。
+                    # 这样无需在 YAML 里硬编码 forward_velocity_controller 等名字。
                     for c in res.controller:
-                        if c.state == "active" and "joint_trajectory_controller" in c.name:
+                        if c.name == self.activate_controller:
+                            continue
+                        if c.state != "active":
+                            continue
+                        ctrl_type = getattr(c, "type", "") or ""
+                        if (
+                            "JointTrajectoryController" in ctrl_type
+                            or "JointGroupPositionController" in ctrl_type
+                            or "JointGroupVelocityController" in ctrl_type
+                            or "JointGroupEffortController" in ctrl_type
+                            or "joint_trajectory_controller" in c.name
+                            or "forward_" in c.name
+                        ):
                             to_deactivate.add(c.name)
                     send_switch(list(to_deactivate))
                 except Exception:
