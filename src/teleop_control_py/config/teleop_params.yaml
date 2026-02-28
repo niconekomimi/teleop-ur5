@@ -19,12 +19,17 @@ teleop_control_node:
     # 夹爪配置
     gripper_open_dist_px: 100.0
     gripper_close_dist_px: 20.0
-    gripper_open_dist_m: 0.12
-    gripper_close_dist_m: 0.02
+    gripper_open_dist_m: 0.10
+    gripper_close_dist_m: 0.01
     depth_unit_scale: 0.001
     # 严格 3D：只用深度反投影得到相机坐标系下的真实 XYZ（米）。
     # 这通常能显著减少“前后移动导致 XY 跟着漂”的视觉耦合（因为像素 u/v 会随深度变化而变化）。
     hand_position_source: "depth"
+    orientation_mode: "hand_relative" # lock=锁定初始姿态 | hand_relative 跟随手腕旋转
+    # 手腕相对旋转轴映射
+    # mapping 是 [x,y,z] 分量的重排；sign 用于每轴取反（>0 不反，<0 取反）
+    orientation_axis_mapping: [2, 0, 1]
+    orientation_axis_sign: [-1.0, 1.0, -1.0]
     depth_min_m: 0.10
     depth_max_m: 2.00
     
@@ -47,19 +52,19 @@ servo_pose_follower:
     ee_frame: "tool0"
     
     # PID 增益 (速度控制下可以适当激进一点)
-    linear_gain: 5.0
-    angular_gain: 2.5
+    linear_gain: 6.0
+    angular_gain: 6.0
     max_linear_speed: 0.6      # m/s
-    max_angular_speed: 1.5     # rad/s
+    max_angular_speed: 2.5     # rad/s
     position_deadband: 0.0005
-    rotation_deadband: 0.005
+    rotation_deadband: 0.002
     command_rate_hz: 100.0
 
-    # 自动启动 Servo 逻辑 (你的核心需求)
+    # 自动启动 Servo 逻辑
     auto_start_servo: true
     start_servo_service: "/servo_node/start_servo"
     
-    # 自动切换控制器逻辑 (你的核心需求)
+    # 自动切换控制器逻辑
     auto_switch_controllers: true
     controller_manager_ns: "/controller_manager"
     activate_controller: "forward_position_controller"

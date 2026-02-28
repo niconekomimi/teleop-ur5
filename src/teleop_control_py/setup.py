@@ -1,3 +1,4 @@
+from glob import glob
 from setuptools import setup
 
 package_name = "teleop_control_py"
@@ -9,19 +10,11 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/teleop_control_py"]),
         ("share/" + package_name, ["package.xml"]),
-        (
-            "share/" + package_name + "/config",
-            [
-                "config/teleop_params.yaml",
-                "config/teleop_hand_params.yaml",
-                "config/teleop_xbox_params.yaml",
-                "config/data_collector_params.yaml",
-            ],
-        ),
         ("share/" + package_name + "/launch", [
             "launch/teleop_control.launch.py",
             "launch/control_system.launch.py",
         ]),
+        ("share/" + package_name + "/config", glob("config/*.yaml")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
