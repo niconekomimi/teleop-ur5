@@ -1,13 +1,17 @@
 data_collector:
   ros__parameters:
-    # --------------------- 输出文件 ---------------------
+    # ==========================================================
+    # 1) 输出文件
+    # ==========================================================
     # 采集到的 LIBERO / robomimic 结构 HDF5 文件路径
     output_path: "/home/rvl/collect_datasets_ws/data/libero_demos.hdf5"
 
-    # --------------------- 相机选择 ---------------------
+    # ==========================================================
+    # 2) 相机输入与角色映射
+    # ==========================================================
     # 先定义两路“物理相机”的原始图像 topic（按你系统实际 topic 改）
-    realsense_color_topic: "/camera/color/image_raw"
-    oakd_rgb_topic: "/oak/rgb/image_raw"
+    realsense_color_topic: "/camera/camera/color/image_raw"
+    oakd_rgb_topic: "/color/video/image"
 
     # 再给两种相机分配角色：全局相机（agentview）和手腕相机（eye_in_hand）
     # 可选值："realsense" | "oakd"
@@ -19,7 +23,9 @@ data_collector:
     global_image_topic: ""
     wrist_image_topic: ""
 
-    # --------------------- 机械臂状态 ---------------------
+    # ==========================================================
+    # 3) 机械臂状态与关节顺序
+    # ==========================================================
     joint_states_topic: "/joint_states"
     # 末端位姿（绝对位姿），用于写入 robot0_eef_pos/quat 和 actions
     # UR 官方驱动常见为：/tcp_pose_broadcaster/pose
@@ -38,7 +44,9 @@ data_collector:
       - wrist_2_joint
       - wrist_3_joint
 
-    # --------------------- 末端执行器 ---------------------
+    # ==========================================================
+    # 4) 末端执行器与夹爪状态
+    # ==========================================================
     # 末端类型：
     # - robotic_gripper：通常有独立的状态 topic（Float32 0~1）
     # - qbsofthand：本工程的 qbsofthand_control 主要靠 service 控制，没有稳定的“状态话题”
@@ -60,7 +68,9 @@ data_collector:
     # - false：没收到就先按 0.0 写入（更适合 qbsofthand 这种没有稳定状态话题的情况）
     require_gripper: false
 
-    # --------------------- 同步与时效 ---------------------
+    # ==========================================================
+    # 5) 同步与时效约束
+    # ==========================================================
     # 三路同步：全局图像 + 手腕图像 + /joint_states
     # ApproximateTimeSynchronizer 的 slop（秒）
     sync_slop_sec: 0.1
@@ -70,7 +80,9 @@ data_collector:
     # gripper 允许的“最大年龄”（相对于当前时间，超过则丢弃该帧）
     gripper_max_age_sec: 0.5
 
-    # --------------------- 图像与存储 ---------------------
+    # ==========================================================
+    # 6) 图像处理与写盘参数
+    # ==========================================================
     # 图像会做：中心裁剪成正方形 -> resize 到 obs_image_size
     # 注意：为了严格兼容 LIBERO / robomimic，节点内部会强制使用 224
     obs_image_size: 224
@@ -79,7 +91,7 @@ data_collector:
     # - "lzf"：速度快（推荐）
     # - "gzip"：更省空间但更吃 CPU
     # - "none"：不压缩（占空间大，但在某些机器上写入更稳定）
-    image_compression: "lzf"
+    image_compression: "gzip"
 
     # 生产者-消费者队列大小：队列满会丢帧（不会阻塞回调）
     queue_maxsize: 400
@@ -88,7 +100,9 @@ data_collector:
     # 每写入多少帧 flush 一次（降低断电丢数据风险，代价是更多 I/O）
     writer_flush_every_n: 200
 
-    # --------------------- 一键回初始位姿（go_home） ---------------------
+    # ==========================================================
+    # 7) 一键回初始位姿（go_home）
+    # ==========================================================
     # go_home 服务会向这个 topic 发布 JointTrajectory
     # UR 驱动常见：/scaled_joint_trajectory_controller/joint_trajectory
     home_joint_trajectory_topic: "/scaled_joint_trajectory_controller/joint_trajectory"
@@ -99,5 +113,8 @@ data_collector:
     # shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint
     home_joint_positions: [1.850, -2.173, 1.450, -1.560, -1.815, 1.780]
 
+    # ==========================================================
+    # 8) 交互控制
+    # ==========================================================
     # 可选：启用终端键盘控制（r 开始录制，s 停止，q 退出；需要按回车）
     enable_keyboard: false

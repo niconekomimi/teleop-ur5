@@ -52,6 +52,7 @@ from rclpy.time import Time
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import Float32
 from std_srvs.srv import Trigger
+from controller_manager_msgs.srv import SwitchController
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration as DurationMsg
 
@@ -391,6 +392,8 @@ class DataCollectorNode(Node):
             "home_joint_trajectory_topic",
             "/scaled_joint_trajectory_controller/joint_trajectory",
         )
+        self.declare_parameter("teleop_controller", "forward_position_controller")
+        self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
 
         self._output_path = str(self.get_parameter("output_path").value)
         self._joint_names = list(self.get_parameter("joint_names").value)
@@ -477,6 +480,8 @@ class DataCollectorNode(Node):
         self._srv_start = self.create_service(Trigger, "~/start", self._srv_start_cb)
         self._srv_stop = self.create_service(Trigger, "~/stop", self._srv_stop_cb)
         self._srv_go_home = self.create_service(Trigger, "~/go_home", self._srv_go_home_cb)
+        self._switch_ctrl_client = self.create_client(SwitchController, "/controller_manager/switch_controller")
+        self._homing_in_progress = False
 
         # --- Optional keyboard thread ---
         self._keyboard_enabled = bool(self.get_parameter("enable_keyboard").value)
@@ -772,33 +777,74 @@ class DataCollectorNode(Node):
         return res
 
     def _srv_go_home_cb(self, _req: Trigger.Request, res: Trigger.Response) -> Trigger.Response:
-        """Publish a JointTrajectory to move the robot back to the configured home joint pose."""
+        """Starts a background thread to switch controllers, go home, and switch back."""
+        if getattr(self, "_homing_in_progress", False):
+            res.success = False
+            res.message = "Homing sequence is already in progress!"
+            return res
+
         home_positions = list(self.get_parameter("home_joint_positions").value)
         if len(home_positions) < 6:
             res.success = False
             res.message = "home_joint_positions must have 6 elements"
             return res
-        home_positions = [float(x) for x in home_positions[:6]]
 
-        duration = float(self.get_parameter("home_duration_sec").value)
-        if duration <= 0.0:
-            duration = 3.0
+        self._homing_in_progress = True
+        threading.Thread(target=self._execute_go_home_sequence, args=(home_positions,), daemon=True).start()
 
-        jt = JointTrajectory()
-        jt.joint_names = [str(n) for n in self._joint_names[:6]]
-
-        pt = JointTrajectoryPoint()
-        pt.positions = home_positions
-        sec = int(duration)
-        nsec = int((duration - sec) * 1e9)
-        pt.time_from_start = DurationMsg(sec=sec, nanosec=nsec)
-        jt.points = [pt]
-
-        self._home_pub.publish(jt)
         res.success = True
-        res.message = f"Published home trajectory ({duration:.2f}s)"
+        res.message = "Homing sequence started (controllers will switch automatically)"
         self.get_logger().info(res.message)
         return res
+
+    def _execute_go_home_sequence(self, home_positions: list) -> None:
+        try:
+            home_positions = [float(x) for x in home_positions[:6]]
+            duration = float(self.get_parameter("home_duration_sec").value)
+            if duration <= 0.0:
+                duration = 3.0
+
+            teleop_ctrl = str(self.get_parameter("teleop_controller").value)
+            traj_ctrl = str(self.get_parameter("trajectory_controller").value)
+
+            req_to_traj = SwitchController.Request()
+            req_to_traj.activate_controllers = [traj_ctrl]
+            req_to_traj.deactivate_controllers = [teleop_ctrl]
+            req_to_traj.strictness = SwitchController.Request.BEST_EFFORT
+
+            if self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info(f"Switching to {traj_ctrl}...")
+                self._switch_ctrl_client.call_async(req_to_traj)
+                time.sleep(0.5)
+            else:
+                self.get_logger().warn("Controller manager not available, attempting to publish anyway.")
+
+            jt = JointTrajectory()
+            jt.joint_names = [str(n) for n in self._joint_names[:6]]
+
+            pt = JointTrajectoryPoint()
+            pt.positions = home_positions
+            sec = int(duration)
+            nsec = int((duration - sec) * 1e9)
+            pt.time_from_start = DurationMsg(sec=sec, nanosec=nsec)
+            jt.points = [pt]
+
+            self._home_pub.publish(jt)
+            self.get_logger().info(f"Published home trajectory, waiting {duration:.2f}s...")
+
+            time.sleep(duration + 0.5)
+
+            req_to_teleop = SwitchController.Request()
+            req_to_teleop.activate_controllers = [teleop_ctrl]
+            req_to_teleop.deactivate_controllers = [traj_ctrl]
+            req_to_teleop.strictness = SwitchController.Request.BEST_EFFORT
+
+            if self._switch_ctrl_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().info(f"Restoring {teleop_ctrl}...")
+                self._switch_ctrl_client.call_async(req_to_teleop)
+                self.get_logger().info("Homing sequence complete. Teleop restored.")
+        finally:
+            self._homing_in_progress = False
 
     # ----------------- Keyboard (optional) -----------------
     def _keyboard_loop(self) -> None:

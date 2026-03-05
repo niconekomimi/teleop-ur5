@@ -15,6 +15,7 @@
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>joy</exec_depend>
   <exec_depend>qbsofthand_control</exec_depend>
+  <exec_depend>robotiq_2f_gripper_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>std_srvs</exec_depend>
   <exec_depend>message_filters</exec_depend>

@@ -1,0 +1,10 @@
+# Robotiq gripper USB-serial adapter udev rule
+# Creates a stable symlink: /dev/robotiq_gripper
+#
+# This rule matches the USB-serial adapter by its unique serial (from /dev/serial/by-id
+# name: usb-FTDI_USB_TO_RS-485_DA6ACQWL-if00-port0).
+#
+# If you have multiple FTDI adapters, keep matching by ID_SERIAL_SHORT so only this one
+# is mapped to /dev/robotiq_gripper.
+
+SUBSYSTEM=="tty", ENV{ID_SERIAL_SHORT}=="DA6ACQWL", SYMLINK+="robotiq_gripper", GROUP="dialout", MODE:="0660"

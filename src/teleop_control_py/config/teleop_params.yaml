@@ -15,6 +15,32 @@ teleop_control_node:
     target_pose_topic: "/target_pose"
 
     # ==========================================================
+    # 2.1) 末端执行器选择
+    # ==========================================================
+    # qbsofthand: SoftHand（service: /qbsofthand_control_node/set_closure）
+    # robotiq: Robotiq（action: /robotiq_2f_gripper_action；若 action 类型不可用则退化为 binary topic）
+    # NOTE: 已移除自动检测，请手动设置 qbsofthand 或 robotiq。
+    end_effector: "robotiq"
+
+    # --- Robotiq 参数（仅在 robotiq 时生效） ---
+    # 扳机“按多少闭多少”（比例闭合）：用 action（position control）
+    robotiq_command_interface: "action"
+    # 如果你只需要开/关（不需要比例），可改为：confidence_topic 或 binary_topic
+    robotiq_confidence_topic: "/robotiq_2f_gripper/confidence_command"
+    robotiq_action_name: "/robotiq_2f_gripper_action"
+    robotiq_open_position_m: 0.14
+    robotiq_close_position_m: 0.0
+    robotiq_speed: 1.0
+    robotiq_force: 0.5
+    robotiq_min_goal_interval_sec: 0.0
+    robotiq_delta_threshold: 0.0
+    robotiq_binary_topic: "/robotiq_2f_gripper/binary_command"
+    robotiq_binary_threshold: 0.5
+
+    # 夹爪输入量化：0=连续（更跟手）；>0=台阶（更稳）
+    gripper_step: 0.0
+
+    # ==========================================================
     # 3) Hand 模式（相机 / MediaPipe / 手-臂映射）
     # ==========================================================
     # --- 相机输入 ---
@@ -64,8 +90,8 @@ teleop_control_node:
     # ==========================================================
     # 5) Xbox 模式（/joy -> TwistStamped）
     # ==========================================================
-    max_linear_vel: 0.5
-    max_angular_vel: 1.0
+    max_linear_vel: 1.5
+    max_angular_vel: 3.0
     joy_deadzone: 0.05
     joy_deadman_enabled: false
 
@@ -75,9 +101,10 @@ teleop_control_node:
     deadman_axis_threshold: 0.5
 
     # 夹爪
-    gripper_close_button: 0
-    gripper_open_button: 1
-    gripper_axis: 5
+    # 注意：如果 gripper_axis >= 0，会优先用扳机轴并忽略按钮。
+    gripper_close_button: 5  # RB
+    gripper_open_button: 4   # LB
+    gripper_axis: -1
 
     linear_x_axis: 0
     linear_y_axis: 1

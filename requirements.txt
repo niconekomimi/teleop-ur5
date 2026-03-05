@@ -8,3 +8,6 @@ transforms3d
 numpy<2.0
 opencv-contrib-python==4.5.5.64
 protobuf>=3.19,<4
+PySide6
+opencv-python
+pyyaml

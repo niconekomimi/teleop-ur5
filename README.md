@@ -7,6 +7,56 @@
 ros2 launch teleop_control_py control_system.launch.py
 ```
 
+## Robotiq（可选）：用 udev 固定串口名
+
+本工程通过 `end_effector:=robotiq` 手动选择 Robotiq 驱动，并用 `robotiq_serial_port` 指定串口路径。推荐使用 `/dev/robotiq_gripper` 这种 udev 软链接（避免 `/dev/ttyUSB*` 因插拔顺序变化而漂移）。
+
+### 1）找到你的 Robotiq USB 设备信息
+
+先插上夹爪 USB，查看它对应的真实设备（例如 `/dev/ttyUSB0`）：
+
+```bash
+ls -l /dev/ttyUSB*
+```
+
+然后用 `udevadm` 查询属性（把 `/dev/ttyUSB0` 换成你的）：
+
+```bash
+udevadm info -a -n /dev/ttyUSB0 | head -n 80
+```
+
+通常你会用到 `idVendor`、`idProduct`，更稳一点可以再加序列号（不同硬件字段名可能不同，例如 `ATTRS{serial}`）。
+
+### 2）写 udev rule，创建稳定软链接 `/dev/robotiq_gripper`
+
+新建规则文件：
+
+```bash
+sudo nano /etc/udev/rules.d/99-robotiq-gripper.rules
+```
+
+示例（请把 `xxxx/yyyy/your_serial` 换成你机器上查到的值；若没有 serial 字段就删掉那一段）：
+
+```udev
+SUBSYSTEM=="tty", ATTRS{idVendor}=="xxxx", ATTRS{idProduct}=="yyyy", ATTRS{serial}=="your_serial", SYMLINK+="robotiq_gripper", MODE:="0666"
+```
+
+重载并触发：
+
+```bash
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+ls -l /dev/robotiq_gripper
+```
+
+### 3）启动时使用（手动选择）
+
+- 显式指定：
+
+```bash
+ros2 launch teleop_control_py control_system.launch.py end_effector:=robotiq robotiq_serial_port:=/dev/robotiq_gripper
+```
+
 ## 激活环境
     sudo apt install python3-venv
     python3 -m venv ~/clds --system-site-packages
@@ -67,7 +117,9 @@ ros2 launch teleop_control_py control_system.launch.py
 ### 构建与运行
 ```bash
 # 构建（只构建本包）
-colcon build --packages-select teleop_control_py
+# 注意：即使你激活了 venv，`colcon` 也可能仍然指向系统的 /usr/bin/colcon（系统 Python）。
+# 为了让生成的 Python 可执行脚本绑定到当前 venv（从而能用到 venv 里 pip 安装的依赖），建议统一用：
+python -m colcon build --packages-select teleop_control_py
 source install/setup.bash
 
 # 运行，自动加载默认参数
