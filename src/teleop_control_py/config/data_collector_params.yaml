@@ -111,7 +111,7 @@ data_collector:
 
     # 你人为设置的“Home 位置（拍照点）关节角”（单位：rad，必须 6 个数，对应 joint_names 顺序）
     # shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint
-    home_joint_positions: [1.850, -2.173, 1.450, -1.560, -1.815, 1.780]
+    home_joint_positions: [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
 
     # ==========================================================
     # 8) 交互控制

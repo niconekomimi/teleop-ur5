@@ -52,7 +52,6 @@ ros2 service call /data_collector/start std_srvs/srv/Trigger {}
 ros2 service call /data_collector/stop  std_srvs/srv/Trigger {}
 # 回home点
 ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
-
 ```
 
 ```bash

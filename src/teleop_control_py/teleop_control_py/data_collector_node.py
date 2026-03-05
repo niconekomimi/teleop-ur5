@@ -21,9 +21,11 @@ Control:
 - Services (recommended for reliability):
     /data_collector/start  (std_srvs/Trigger) -> begin a new demo
     /data_collector/stop   (std_srvs/Trigger) -> stop current demo
+    /data_collector/go_home (std_srvs/Trigger) -> switch controllers, go to home joints, then restore teleop
   You can call them with:
     ros2 service call /data_collector/start std_srvs/srv/Trigger {}
     ros2 service call /data_collector/stop  std_srvs/srv/Trigger {}
+    ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
 - Optional keyboard thread (enable_keyboard=true):
     r: start new demo
     s: stop
@@ -69,6 +71,55 @@ def _quat_normalize_xyzw(q: np.ndarray) -> np.ndarray:
     if norm <= 0.0:
         return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
     return (q / norm).astype(np.float64)
+
+
+def _quat_to_rotmat_xyzw(q: np.ndarray) -> np.ndarray:
+    """Quaternion (x,y,z,w) -> 3x3 rotation matrix mapping tool->base."""
+    qn = _quat_normalize_xyzw(q)
+    x, y, z, w = (float(qn[0]), float(qn[1]), float(qn[2]), float(qn[3]))
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return np.array(
+        [
+            [1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy)],
+            [2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx)],
+            [2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _normalize_vec3(v: np.ndarray) -> np.ndarray:
+    v = v.astype(np.float64)
+    n = float(np.linalg.norm(v))
+    if n <= 1e-12:
+        return np.array([0.0, 0.0, 0.0], dtype=np.float64)
+    return (v / n).astype(np.float64)
+
+
+def _quat_from_two_vectors(v_from: np.ndarray, v_to: np.ndarray) -> np.ndarray:
+    """Minimal rotation that rotates v_from to v_to (both in same frame)."""
+    a = _normalize_vec3(v_from)
+    b = _normalize_vec3(v_to)
+    if float(np.linalg.norm(a)) <= 1e-12 or float(np.linalg.norm(b)) <= 1e-12:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+
+    dot = float(np.dot(a, b))
+    dot = _clamp(dot, -1.0, 1.0)
+    if dot > 0.999999:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float64)
+    if dot < -0.999999:
+        # 180 deg: pick an arbitrary orthogonal axis
+        axis = np.cross(a, np.array([1.0, 0.0, 0.0], dtype=np.float64))
+        if float(np.linalg.norm(axis)) < 1e-6:
+            axis = np.cross(a, np.array([0.0, 1.0, 0.0], dtype=np.float64))
+        axis = _normalize_vec3(axis)
+        return np.array([axis[0], axis[1], axis[2], 0.0], dtype=np.float64)
+
+    c = np.cross(a, b)
+    q = np.array([c[0], c[1], c[2], 1.0 + dot], dtype=np.float64)
+    return _quat_normalize_xyzw(q)
 
 
 def _quat_to_rotvec_xyzw(q_xyzw: np.ndarray) -> np.ndarray:
@@ -386,7 +437,10 @@ class DataCollectorNode(Node):
         self.declare_parameter("enable_keyboard", False)
 
         # Go-home settings (service ~/go_home)
-        self.declare_parameter("home_joint_positions", [0.0, -1.57, 1.57, -1.57, -1.57, 0.0])
+        self.declare_parameter(
+            "home_joint_positions",
+            [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195],
+        )
         self.declare_parameter("home_duration_sec", 3.0)
         self.declare_parameter(
             "home_joint_trajectory_topic",
@@ -394,7 +448,6 @@ class DataCollectorNode(Node):
         )
         self.declare_parameter("teleop_controller", "forward_position_controller")
         self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
-
         self._output_path = str(self.get_parameter("output_path").value)
         self._joint_names = list(self.get_parameter("joint_names").value)
         self._pose_max_age = float(self.get_parameter("pose_max_age_sec").value)
@@ -623,6 +676,25 @@ class DataCollectorNode(Node):
         eef_pos = np.array([p.x, p.y, p.z], dtype=np.float32)
         eef_quat = np.array([q.x, q.y, q.z, q.w], dtype=np.float32)
         return (eef_pos, eef_quat, gripper), None
+
+    def _get_latest_tool_pose_msg(self, ref_time: Time) -> Tuple[Optional[PoseStamped], Optional[str]]:
+        """Return (PoseStamped, None) if ok; otherwise (None, reason_key)."""
+        with self._cache_lock:
+            pose_msg = self._latest_tool_pose
+            pose_t = self._latest_tool_pose_time
+
+        if pose_msg is None or pose_t is None:
+            return None, "no_pose"
+
+        # Some broadcasters may publish a zero stamp; optionally treat it as ref_time.
+        if self._pose_stamp_zero_is_ref and pose_t.nanoseconds == 0:
+            pose_t = ref_time
+
+        if self._pose_max_age > 0.0:
+            if abs((ref_time - pose_t).nanoseconds) * 1e-9 > self._pose_max_age:
+                return None, "pose_stale"
+
+        return pose_msg, None
 
     # ----------------- Joint mapping -----------------
     def _map_joint_positions(self, msg: JointState) -> Optional[np.ndarray]:
