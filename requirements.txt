@@ -11,3 +11,4 @@ protobuf>=3.19,<4
 PySide6
 opencv-python
 pyyaml
+pyrealsense2

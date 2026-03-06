@@ -56,7 +56,7 @@ data_collector:
 
     # 可选：强制指定夹爪状态 topic（消息类型 Float32，范围 [0,1]）
     # 留空则根据 end_effector_type 自动选择下面的默认值
-    gripper_state_topic: ""
+    gripper_state_topic: "/gripper/cmd"
 
     # 当 gripper_state_topic 为空时使用：
     robotic_gripper_state_topic: "/gripper/state"
@@ -73,10 +73,10 @@ data_collector:
     # ==========================================================
     # 三路同步：全局图像 + 手腕图像 + /joint_states
     # ApproximateTimeSynchronizer 的 slop（秒）
-    sync_slop_sec: 0.1
+    sync_slop_sec: 0.05
     sync_queue_size: 30
     # tool_pose 允许的“最大时间差”（相对于图像时间戳，超过则丢弃该帧）
-    pose_max_age_sec: 0.2
+    pose_max_age_sec: 0.05
     # gripper 允许的“最大年龄”（相对于当前时间，超过则丢弃该帧）
     gripper_max_age_sec: 0.5
 

@@ -150,7 +150,8 @@ class TeleopControlNode(Node):
             self._end_effector_param = "qbsofthand"
 
         # Publishers (fixed topics as a central dispatcher)
-        self.pose_pub = self.create_publisher(PoseStamped, "/pose_target_cmds", 10)
+        target_pose_topic = self.get_parameter("target_pose_topic").get_parameter_value().string_value
+        self.pose_pub = self.create_publisher(PoseStamped, target_pose_topic, 10)
         self.twist_pub = self.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", 10)
         self.gripper_pub = self.create_publisher(Float32, gripper_cmd_topic, 10)
         self._qb_client = self.create_client(SetClosure, "/qbsofthand_control_node/set_closure")

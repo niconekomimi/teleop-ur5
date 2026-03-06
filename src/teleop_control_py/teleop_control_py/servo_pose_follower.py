@@ -196,8 +196,6 @@ class ServoPoseFollower(Node):
             req.activate_controllers = [self.activate_controller]
             req.deactivate_controllers = deactivate_list
             req.strictness = SwitchController.Request.BEST_EFFORT if self.switch_strictness == "best_effort" else SwitchController.Request.STRICT
-            req.activate_asap = True
-            req.timeout = DurationMsg(sec=2, nanosec=0)
 
             self.get_logger().info(f"Switching: +{self.activate_controller} -{deactivate_list}")
             future = self._switch_ctrl_client.call_async(req)
