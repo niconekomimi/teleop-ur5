@@ -31,21 +31,20 @@ def _default_python_executable() -> str:
 	return "python3"
 
 
-def _read_control_mode_from_params(params_file: str) -> str:
-	mode = "hand"
+def _load_teleop_params(params_file: str) -> Dict[str, Any]:
 	try:
 		import yaml  # type: ignore
 	except Exception:
-		return mode
+		return {}
 
 	try:
 		with open(params_file, "r", encoding="utf-8") as f:
 			data = yaml.safe_load(f)
 	except Exception:
-		return mode
+		return {}
 
 	if not isinstance(data, dict):
-		return mode
+		return {}
 
 	for key in ("teleop_control_node", "/teleop_control_node"):
 		block = data.get(key)
@@ -54,65 +53,77 @@ def _read_control_mode_from_params(params_file: str) -> str:
 		params = block.get("ros__parameters")
 		if not isinstance(params, dict):
 			continue
-		cm = params.get("control_mode")
-		if isinstance(cm, str) and cm.strip():
-			return cm.strip().lower()
-	return mode
+		return params
+	return {}
 
 
-def _read_end_effector_from_params(params_file: str) -> str:
-	ee = "robotiq"
-	try:
-		import yaml  # type: ignore
-	except Exception:
-		return ee
-
-	try:
-		with open(params_file, "r", encoding="utf-8") as f:
-			data = yaml.safe_load(f)
-	except Exception:
-		return ee
-
-	if not isinstance(data, dict):
-		return ee
-
-	for key in ("teleop_control_node", "/teleop_control_node"):
-		block = data.get(key)
-		if not isinstance(block, dict):
-			continue
-		params = block.get("ros__parameters")
-		if not isinstance(params, dict):
-			continue
-		raw = params.get("end_effector")
-		if isinstance(raw, str) and raw.strip():
-			return raw.strip().lower()
-	return ee
+def _coerce_input_type(value: str) -> str:
+	normalized = value.strip().lower()
+	if normalized == "xbox":
+		return "joy"
+	if normalized == "hand":
+		return "mediapipe"
+	if normalized in ("joy", "mediapipe"):
+		return normalized
+	return ""
 
 
-def _resolve_control_mode(context) -> str:
-	override = LaunchConfiguration("control_mode").perform(context).strip().lower()
-	if override in ("hand", "xbox"):
-		return override
+def _coerce_gripper_type(value: str) -> str:
+	normalized = value.strip().lower()
+	if normalized == "auto":
+		return "qbsofthand"
+	if normalized in ("qbsofthand", "robotiq"):
+		return normalized
+	return ""
+
+
+def _resolve_input_type(context) -> str:
 	params_file = LaunchConfiguration("params_file").perform(context)
-	return _read_control_mode_from_params(params_file)
+	resolved = _coerce_input_type(LaunchConfiguration("input_type").perform(context))
+	if resolved:
+		return resolved
+
+	resolved = _coerce_input_type(LaunchConfiguration("control_mode").perform(context))
+	if resolved:
+		return resolved
+
+	params = _load_teleop_params(params_file)
+	resolved = _coerce_input_type(str(params.get("input_type", "")))
+	if resolved:
+		return resolved
+
+	resolved = _coerce_input_type(str(params.get("control_mode", "")))
+	if resolved:
+		return resolved
+
+	return "joy"
 
 
-def _resolve_end_effector(context) -> str:
-	override = LaunchConfiguration("end_effector").perform(context).strip().lower()
-	if override in ("auto", "qbsofthand", "robotiq"):
-		return override
+def _resolve_gripper_type(context) -> str:
 	params_file = LaunchConfiguration("params_file").perform(context)
-	return _read_end_effector_from_params(params_file)
+	resolved = _coerce_gripper_type(LaunchConfiguration("gripper_type").perform(context))
+	if resolved:
+		return resolved
+
+	resolved = _coerce_gripper_type(LaunchConfiguration("end_effector").perform(context))
+	if resolved:
+		return resolved
+
+	params = _load_teleop_params(params_file)
+	resolved = _coerce_gripper_type(str(params.get("gripper_type", "")))
+	if resolved:
+		return resolved
+
+	resolved = _coerce_gripper_type(str(params.get("end_effector", "")))
+	if resolved:
+		return resolved
+
+	return "robotiq"
 
 
 def _maybe_include_end_effector_driver(context, *args, **kwargs):
-	ee = _resolve_end_effector(context)
-	actions = [LogInfo(msg=f"[control_system] resolved end_effector: {ee}")]
-
-	# NOTE: auto-detection removed. Keep backward compatibility by treating 'auto' as qbsofthand.
-	if ee == "auto":
-		actions.append(LogInfo(msg="[control_system] end_effector=auto is deprecated; using qbsofthand (manual selection only)"))
-		ee = "qbsofthand"
+	ee = _resolve_gripper_type(context)
+	actions = [LogInfo(msg=f"[control_system] resolved gripper_type: {ee}")]
 
 	if ee == "robotiq":
 		robotiq_share = get_package_share_directory("robotiq_2f_gripper_hardware")
@@ -145,10 +156,10 @@ def _maybe_include_end_effector_driver(context, *args, **kwargs):
 
 
 def _maybe_include_joy_driver(context, *args, **kwargs):
-	control_mode = _resolve_control_mode(context)
+	input_type = _resolve_input_type(context)
 
-	actions = [LogInfo(msg=f"[control_system] resolved control_mode: {control_mode}")]
-	if control_mode != "xbox":
+	actions = [LogInfo(msg=f"[control_system] resolved input_type: {input_type}")]
+	if input_type != "joy":
 		return actions
 
 	joy_share = get_package_share_directory("multi_joy_driver")
@@ -166,20 +177,17 @@ def _maybe_include_joy_driver(context, *args, **kwargs):
 
 
 def _maybe_include_moveit_servo(context, *args, **kwargs):
-	control_mode = _resolve_control_mode(context)
-
 	enable_moveit_raw = LaunchConfiguration("enable_moveit").perform(context).strip().lower()
 	enable_moveit = enable_moveit_raw in ("1", "true", "yes", "on")
 
 	actions = [
 		LogInfo(
 			msg=(
-				f"[control_system] enable_moveit={enable_moveit_raw} "
-				f"control_mode={control_mode}"
+				f"[control_system] enable_moveit={enable_moveit_raw}"
 			)
 		)
 	]
-	if (control_mode != "xbox") or (not enable_moveit):
+	if not enable_moveit:
 		return actions
 
 	moveit_share = get_package_share_directory("ur_moveit_config")
@@ -207,7 +215,7 @@ def _maybe_include_moveit_servo(context, *args, **kwargs):
 
 
 def _maybe_include_realsense(context, *args, **kwargs):
-	control_mode = _resolve_control_mode(context)
+	input_type = _resolve_input_type(context)
 
 	enable_camera_raw = LaunchConfiguration("enable_camera").perform(context).strip().lower()
 	enable_camera = enable_camera_raw in ("1", "true", "yes", "on")
@@ -216,13 +224,13 @@ def _maybe_include_realsense(context, *args, **kwargs):
 		LogInfo(
 			msg=(
 				f"[control_system] enable_camera={enable_camera_raw} "
-				f"control_mode={control_mode}"
+				f"input_type={input_type}"
 			)
 		)
 	]
 
-	if control_mode == "xbox":
-		actions.append(LogInfo(msg="[control_system] Skip RealSense in xbox mode"))
+	if input_type != "mediapipe":
+		actions.append(LogInfo(msg="[control_system] Skip RealSense because input_type is not mediapipe"))
 		return actions
 
 	if not enable_camera:
@@ -257,12 +265,22 @@ def generate_launch_description() -> LaunchDescription:
 	control_mode_arg = DeclareLaunchArgument(
 		"control_mode",
 		default_value="",
-		description="Optional control mode override (hand|xbox). Empty means read from params_file.",
+		description="Deprecated alias for input_type (hand->mediapipe, xbox->joy).",
 	)
 	end_effector_arg = DeclareLaunchArgument(
 		"end_effector",
 		default_value="",
-		description="Optional end effector override (qbsofthand|robotiq; 'auto' is a deprecated alias for qbsofthand). Empty means read from params_file.",
+		description="Deprecated alias for gripper_type (auto->qbsofthand).",
+	)
+	input_type_arg = DeclareLaunchArgument(
+		"input_type",
+		default_value="",
+		description="Optional input backend override (joy|mediapipe). Empty means read from params_file.",
+	)
+	gripper_type_arg = DeclareLaunchArgument(
+		"gripper_type",
+		default_value="",
+		description="Optional gripper backend override (robotiq|qbsofthand). Empty means read from params_file.",
 	)
 
 	robotiq_namespace_arg = DeclareLaunchArgument(
@@ -324,12 +342,12 @@ def generate_launch_description() -> LaunchDescription:
 	enable_moveit_arg = DeclareLaunchArgument(
 		"enable_moveit",
 		default_value="true",
-		description="Enable MoveIt bringup (move_group + optional servo). Auto-included for xbox mode.",
+		description="Enable MoveIt bringup (move_group + optional servo).",
 	)
 	enable_camera_arg = DeclareLaunchArgument(
 		"enable_camera",
 		default_value="true",
-		description="Enable RealSense camera (effective only in hand mode)",
+		description="Enable RealSense camera (effective only when input_type=mediapipe)",
 	)
 
 	ur_driver_share = get_package_share_directory("ur_robot_driver")
@@ -348,6 +366,8 @@ def generate_launch_description() -> LaunchDescription:
 		launch_arguments={
 			"params_file": LaunchConfiguration("params_file"),
 			"python_executable": LaunchConfiguration("python_executable"),
+			"input_type": LaunchConfiguration("input_type"),
+			"gripper_type": LaunchConfiguration("gripper_type"),
 			"control_mode": LaunchConfiguration("control_mode"),
 			"end_effector": LaunchConfiguration("end_effector"),
 		}.items(),
@@ -357,6 +377,8 @@ def generate_launch_description() -> LaunchDescription:
 		[
 			params_file_arg,
 			python_executable_arg,
+			input_type_arg,
+			gripper_type_arg,
 			control_mode_arg,
 			end_effector_arg,
 			robotiq_namespace_arg,

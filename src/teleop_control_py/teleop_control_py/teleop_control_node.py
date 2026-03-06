@@ -1,480 +1,209 @@
 #!/usr/bin/env python3
+"""遥操作主节点：只负责参数装配、策略实例化和高频控制循环。"""
+
 from __future__ import annotations
 
-import math
+import time
 from typing import Optional
 
-import cv2
+import numpy as np
 import rclpy
-from rclpy.action import ActionClient
-from geometry_msgs.msg import PoseStamped, TwistStamped
-from qbsofthand_control.srv import SetClosure
-from rcl_interfaces.msg import SetParametersResult
+from geometry_msgs.msg import Twist
 from rclpy.node import Node
-from std_msgs.msg import Float32
-from std_msgs.msg import Float32MultiArray
 
-from teleop_control_py.input_handlers import BaseInputHandler, HandInputHandler, JoyInputHandler
-
-
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
-
-
-class _NullInputHandler(BaseInputHandler):
-    """Fallback strategy when an input backend is not implemented."""
-
-    def get_command(self):
-        return None
-
-    def get_gripper_state(self):
-        return None
-
-    def is_active(self) -> bool:
-        return False
+from .gripper_controllers import QbSoftHandController, RobotiqController
+from .input_handlers import JoyInputHandler, MediaPipeInputHandler
+from .servo_pose_follower import ServoPoseFollower
+from .transform_utils import apply_velocity_limits
 
 
 class TeleopControlNode(Node):
-    """Teleoperation bridge that delegates input processing via Strategy Pattern."""
+    """主调度节点，遵循 DIP：只依赖抽象协议，不依赖具体设备细节。"""
 
     def __init__(self) -> None:
         super().__init__("teleop_control_node")
+        self._declare_parameters()
 
-        # Parameters for easy runtime tuning
-        self.declare_parameter("image_topic", "/camera/camera/color/image_raw")
-        self.declare_parameter("depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
-        self.declare_parameter("camera_info_topic", "/camera/camera/aligned_depth_to_color/camera_info")
-        self.declare_parameter("robot_pose_topic", "/tcp_pose_broadcaster/pose")
-        self.declare_parameter("target_pose_topic", "/target_pose")
+        self._input_type = str(self.get_parameter("input_type").value).strip().lower()
+        self._gripper_type = str(self.get_parameter("gripper_type").value).strip().lower()
+        self._control_hz = max(1.0, float(self.get_parameter("control_hz").value))
+
+        self._max_velocity = np.array(
+            [
+                float(self.get_parameter("max_linear_vel").value),
+                float(self.get_parameter("max_linear_vel").value),
+                float(self.get_parameter("max_linear_vel").value),
+                float(self.get_parameter("max_angular_vel").value),
+                float(self.get_parameter("max_angular_vel").value),
+                float(self.get_parameter("max_angular_vel").value),
+            ],
+            dtype=np.float64,
+        )
+        self._max_acceleration = np.array(
+            [
+                float(self.get_parameter("max_linear_accel").value),
+                float(self.get_parameter("max_linear_accel").value),
+                float(self.get_parameter("max_linear_accel").value),
+                float(self.get_parameter("max_angular_accel").value),
+                float(self.get_parameter("max_angular_accel").value),
+                float(self.get_parameter("max_angular_accel").value),
+            ],
+            dtype=np.float64,
+        )
+        self._last_twist_vec = np.zeros(6, dtype=np.float64)
+        self._last_loop_time = time.monotonic()
+
+        self.input_handler = self._build_input_handler(self._input_type)
+        self.gripper_ctrl = self._build_gripper_controller(self._gripper_type)
+        self.arm_ctrl = ServoPoseFollower(self)
+
+        self._timer = self.create_timer(1.0 / self._control_hz, self._control_loop)
+        self.get_logger().info(
+            f"TeleopControlNode ready. input_type={self._input_type}, gripper_type={self._gripper_type}, "
+            f"control_hz={self._control_hz:.1f}"
+        )
+
+    def _declare_parameters(self) -> None:
+        self.declare_parameter("input_type", "joy")
+        self.declare_parameter("gripper_type", "robotiq")
+        self.declare_parameter("control_hz", 50.0)
         self.declare_parameter("target_frame_id", "base")
-        self.declare_parameter("gripper_cmd_topic", "/gripper/cmd")
+        self.declare_parameter("servo_twist_topic", "/servo_node/delta_twist_cmds")
+        self.declare_parameter("auto_start_servo", True)
+        self.declare_parameter("start_servo_service", "/servo_node/start_servo")
+        self.declare_parameter("auto_switch_controllers", True)
+        self.declare_parameter("controller_manager_ns", "/controller_manager")
+        self.declare_parameter("teleop_controller", "forward_position_controller")
+        self.declare_parameter("trajectory_controller", "scaled_joint_trajectory_controller")
+        self.declare_parameter("startup_retry_period_sec", 1.0)
+        self.declare_parameter("max_linear_vel", 1.5)
+        self.declare_parameter("max_angular_vel", 3.0)
+        self.declare_parameter("max_linear_accel", 4.0)
+        self.declare_parameter("max_angular_accel", 8.0)
 
-        # End-effector selection:
-        # - qbsofthand: use qbsofthand_control SetClosure service
-        # - robotiq: use robotiq_2f_gripper action server (preferred) or topic commands (fallback)
-        # NOTE: auto-detection removed at the system level; keep 'auto' as an alias for qbsofthand.
-        self.declare_parameter("end_effector", "robotiq")  # qbsofthand|robotiq (auto alias supported)
-
-        # Robotiq config (only used when end_effector=robotiq)
-        # robotiq_command_interface:
-        # - confidence_topic: publish [-1..1] to /robotiq_2f_gripper/confidence_command (best for trigger)
-        # - binary_topic: publish +/-1 to /robotiq_2f_gripper/binary_command
-        # - action: send MoveTwoFingerGripper goals (position control; can be chatty)
-        self.declare_parameter("robotiq_command_interface", "confidence_topic")
-        self.declare_parameter("robotiq_action_name", "/robotiq_2f_gripper_action")
-        self.declare_parameter("robotiq_open_position_m", 0.14)  # [m] distance between fingers
-        self.declare_parameter("robotiq_close_position_m", 0.0)  # [m]
-        self.declare_parameter("robotiq_speed", 1.0)  # [0..1]
-        self.declare_parameter("robotiq_force", 0.5)  # [0..1]
-        self.declare_parameter("robotiq_min_goal_interval_sec", 0.10)
-        self.declare_parameter("robotiq_delta_threshold", 0.02)
-        # If True (and robotiq_command_interface is action), keep sending goals even if closure didn't change.
-        # Default False to avoid spamming the action server when a button is held.
-        self.declare_parameter("robotiq_action_force_republish", False)
-        self.declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
-        # Fallback topic control (if action msg not available in python env)
-        self.declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
-        self.declare_parameter("robotiq_binary_threshold", 0.5)  # closure >= -> close, else open
-        self.declare_parameter("scale_factor", 0.5)
-        self.declare_parameter("axis_mapping", [0, 1, 2])
-        self.declare_parameter("smoothing_alpha", 0.2)
-        self.declare_parameter("gripper_open_dist_px", 100.0)
-        self.declare_parameter("gripper_close_dist_px", 20.0)
-        self.declare_parameter("gripper_open_dist_m", 0.12)
-        self.declare_parameter("gripper_close_dist_m", 0.03)
-        self.declare_parameter("depth_unit_scale", 0.001)  # 16UC1 in mm -> m
-        self.declare_parameter("hand_position_source", "hybrid")  # depth|normalized|hybrid
-        # lock: keep robot orientation fixed
-        # hand_relative: apply hand wrist delta rotation onto robot initial orientation
-        self.declare_parameter("orientation_mode", "lock")  # lock|hand_relative
-        # When using hand_relative, map the hand delta-rotation vector components into robot delta.
-        # This helps fix axis mixing/inversion caused by camera/hand coordinate conventions.
-        self.declare_parameter("orientation_axis_mapping", [0, 1, 2])
-        self.declare_parameter("orientation_axis_sign", [1.0, 1.0, 1.0])
-        self.declare_parameter("depth_min_m", 0.1)
-        self.declare_parameter("depth_max_m", 2.0)
-        # Keyboard deadman input backend:
-        # - opencv: uses cv2.waitKey() events (can miss key-up; not ideal for true "hold")
-        # - pynput: tracks press/release reliably (recommended for immediate stop)
-        self.declare_parameter("space_deadman_backend", "opencv")  # opencv|pynput
-        # opencv backend uses a latch window extended by key repeats
-        self.declare_parameter("space_deadman_hold_sec", 0.3)
-
-        # Deadman filtering: avoid flicker without adding noticeable stop latency.
-        # Engage can be slightly delayed to avoid false triggers; release should be quick.
-        self.declare_parameter("deadman_filter_enabled", True)
-        self.declare_parameter("deadman_engage_confirm_sec", 0.10)
-        self.declare_parameter("deadman_release_confirm_sec", 0.03)
-        self.declare_parameter("gripper_requires_deadman", True)
-        self.declare_parameter("gripper_step", 0.2)
-        self.declare_parameter("gripper_duration_sec", 0.5)
-        self.declare_parameter("gripper_speed_ratio", 1.0)
-        # When depth-based metric gripper distance becomes temporarily unavailable,
-        # hold the last valid metric distance for a short time to prevent oscillation.
-        self.declare_parameter("gripper_metric_hold_sec", 0.25)
-        self.declare_parameter("control_mode", "hand")  # hand|xbox
         self.declare_parameter("joy_topic", "/joy")
-        self.declare_parameter("xbox_loop_hz", 60.0)
-        self.declare_parameter("xbox_deadzone", 0.12)
-        self.declare_parameter("xbox_linear_speed", 0.15)  # m/s
-        self.declare_parameter("xbox_angular_speed", 0.8)  # rad/s
-        self.declare_parameter("xbox_linear_axis", [0, 1, 4])
-        self.declare_parameter("xbox_linear_sign", [1.0, -1.0, -1.0])
-        self.declare_parameter("xbox_angular_axis", [7, 6, 3])
-        self.declare_parameter("xbox_angular_sign", [1.0, 1.0, -1.0])
-        self.declare_parameter("xbox_deadman_button", 5)
-        self.declare_parameter("xbox_gripper_close_button", 0)
-        self.declare_parameter("xbox_gripper_open_button", 1)
+        self.declare_parameter("joy_deadzone", 0.05)
+        self.declare_parameter("joy_curve", "linear")
+        self.declare_parameter("joy_deadman_enabled", False)
+        self.declare_parameter("deadman_button", -1)
+        self.declare_parameter("deadman_axis", 4)
+        self.declare_parameter("deadman_axis_threshold", 0.5)
+        self.declare_parameter("linear_x_axis", 0)
+        self.declare_parameter("linear_y_axis", 1)
+        self.declare_parameter("linear_z_axis", -1)
+        self.declare_parameter("linear_z_up_button", 1)
+        self.declare_parameter("linear_z_down_button", 0)
+        self.declare_parameter("angular_x_axis", 3)
+        self.declare_parameter("angular_y_axis", 2)
+        self.declare_parameter("angular_z_axis", -1)
+        self.declare_parameter("angular_z_positive_button", 3)
+        self.declare_parameter("angular_z_negative_button", 2)
+        self.declare_parameter("linear_axis_sign", [-1.0, -1.0, 1.0])
+        self.declare_parameter("angular_axis_sign", [-1.0, 1.0, 1.0])
+        self.declare_parameter("gripper_close_button", 5)
+        self.declare_parameter("gripper_open_button", 4)
+        self.declare_parameter("gripper_axis", -1)
+        self.declare_parameter("gripper_axis_inverted", False)
 
-        gripper_cmd_topic = self.get_parameter("gripper_cmd_topic").get_parameter_value().string_value
-        self.control_mode = self.get_parameter("control_mode").get_parameter_value().string_value.strip().lower()
-        if self.control_mode not in {"hand", "xbox"}:
-            self.get_logger().warn("control_mode must be 'hand' or 'xbox'; falling back to 'hand'")
-            self.control_mode = "hand"
+        self.declare_parameter("mediapipe_topic", "/mediapipe/hand_pose")
+        self.declare_parameter("mediapipe_deadzone", 0.02)
+        self.declare_parameter("mediapipe_linear_scale", 1.0)
+        self.declare_parameter("mediapipe_angular_scale", 1.0)
+        self.declare_parameter("mediapipe_linear_axis_mapping", [0, 1, 2])
+        self.declare_parameter("mediapipe_angular_axis_mapping", [0, 1, 2])
+        self.declare_parameter("mediapipe_linear_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("mediapipe_angular_axis_sign", [1.0, 1.0, 1.0])
 
-        self.target_frame_id = self.get_parameter("target_frame_id").get_parameter_value().string_value
+        self.declare_parameter("gripper_cmd_topic", "/gripper/cmd")
+        self.declare_parameter("gripper_command_delta", 0.01)
+        self.declare_parameter("robotiq_command_interface", "confidence_topic")
+        self.declare_parameter("robotiq_confidence_topic", "/robotiq_2f_gripper/confidence_command")
+        self.declare_parameter("robotiq_binary_topic", "/robotiq_2f_gripper/binary_command")
+        self.declare_parameter("robotiq_binary_threshold", 0.5)
+        self.declare_parameter("qbsofthand_service_name", "/qbsofthand_control_node/set_closure")
+        self.declare_parameter("qbsofthand_duration_sec", 0.3)
+        self.declare_parameter("qbsofthand_speed_ratio", 1.0)
 
-        self.gripper_step = float(self.get_parameter("gripper_step").get_parameter_value().double_value)
-        self.gripper_duration_sec = float(self.get_parameter("gripper_duration_sec").get_parameter_value().double_value)
-        self.gripper_speed_ratio = float(self.get_parameter("gripper_speed_ratio").get_parameter_value().double_value)
+    def _build_input_handler(self, input_type: str):
+        strategies = {
+            "joy": JoyInputHandler,
+            "mediapipe": MediaPipeInputHandler,
+        }
+        handler_cls = strategies.get(input_type)
+        if handler_cls is None:
+            self.get_logger().warn(f"未知 input_type '{input_type}'，回退到 joy。")
+            handler_cls = JoyInputHandler
+        return handler_cls(self)
 
-        self._end_effector_param = str(self.get_parameter("end_effector").value).strip().lower()
-        if self._end_effector_param == "auto":
-            self.get_logger().info("end_effector=auto is deprecated; using qbsofthand (manual selection only)")
-            self._end_effector_param = "qbsofthand"
+    def _build_gripper_controller(self, gripper_type: str):
+        strategies = {
+            "robotiq": RobotiqController,
+            "qbsofthand": QbSoftHandController,
+        }
+        controller_cls = strategies.get(gripper_type)
+        if controller_cls is None:
+            self.get_logger().warn(f"未知 gripper_type '{gripper_type}'，回退到 robotiq。")
+            controller_cls = RobotiqController
+        return controller_cls(self)
 
-        if self._end_effector_param not in {"qbsofthand", "robotiq"}:
-            self.get_logger().warn(
-                f"end_effector must be one of qbsofthand|robotiq; got '{self._end_effector_param}', falling back to qbsofthand"
-            )
-            self._end_effector_param = "qbsofthand"
-
-        # Publishers (fixed topics as a central dispatcher)
-        target_pose_topic = self.get_parameter("target_pose_topic").get_parameter_value().string_value
-        self.pose_pub = self.create_publisher(PoseStamped, target_pose_topic, 10)
-        self.twist_pub = self.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", 10)
-        self.gripper_pub = self.create_publisher(Float32, gripper_cmd_topic, 10)
-        self._qb_client = self.create_client(SetClosure, "/qbsofthand_control_node/set_closure")
-        if not self._qb_client.wait_for_service(timeout_sec=0.2):
-            self.get_logger().info("SoftHand service not available yet; will retry on demand")
-
-        self._robotiq_binary_pub = self.create_publisher(
-            Float32MultiArray,
-            str(self.get_parameter("robotiq_binary_topic").value),
-            10,
+    def _twist_to_vector(self, twist: Twist) -> np.ndarray:
+        return np.array(
+            [
+                twist.linear.x,
+                twist.linear.y,
+                twist.linear.z,
+                twist.angular.x,
+                twist.angular.y,
+                twist.angular.z,
+            ],
+            dtype=np.float64,
         )
 
-        self._robotiq_confidence_pub = self.create_publisher(
-            Float32MultiArray,
-            str(self.get_parameter("robotiq_confidence_topic").value),
-            10,
+    def _vector_to_twist(self, values: np.ndarray) -> Twist:
+        twist = Twist()
+        twist.linear.x = float(values[0])
+        twist.linear.y = float(values[1])
+        twist.linear.z = float(values[2])
+        twist.angular.x = float(values[3])
+        twist.angular.y = float(values[4])
+        twist.angular.z = float(values[5])
+        return twist
+
+    def _control_loop(self) -> None:
+        twist, gripper_val = self.input_handler.get_command()
+        now = time.monotonic()
+        dt = max(1e-4, now - self._last_loop_time)
+        self._last_loop_time = now
+
+        target_vec = self._twist_to_vector(twist)
+        limited_vec = apply_velocity_limits(
+            target=target_vec,
+            previous=self._last_twist_vec,
+            max_velocity=self._max_velocity,
+            max_acceleration=self._max_acceleration,
+            dt=dt,
         )
 
-        self._robotiq_action_client = None
-        self._robotiq_action_goal_type = None
-        self._setup_robotiq_action_client_best_effort()
+        # When the input strategy has already snapped an axis back to zero,
+        # clear that axis immediately instead of letting accel limiting create coast.
+        zero_axes = np.isclose(target_vec, 0.0, atol=1e-6)
+        limited_vec[zero_axes] = 0.0
+        self._last_twist_vec = limited_vec
 
-        self._selected_end_effector: str = "publish_only"  # publish_only|qbsofthand|robotiq
-        self._select_end_effector(initial=True)
+        limited_twist = self._vector_to_twist(limited_vec)
+        self.arm_ctrl.send_twist(limited_twist)
+        self.gripper_ctrl.set_gripper(gripper_val)
 
-        self.add_on_set_parameters_callback(self._on_params)
-        self._last_gripper_cmd: Optional[float] = None
-        self._last_gripper_call_ns = 0
-        self._gripper_delta_threshold = 0.02
-        self._gripper_min_interval_ns = int(0.1 * 1e9)
-
-        self._last_gripper_pub_cmd: Optional[float] = None
-
-        self._robotiq_last_cmd: Optional[float] = None
-        self._robotiq_last_call_ns: int = 0
-        self.input_handler: BaseInputHandler
-        if self.control_mode == "hand":
-            self.input_handler = HandInputHandler(self)
-            self.get_logger().info("TeleopControlNode mode=hand (HandInputHandler)")
-        else:
-            self.input_handler = JoyInputHandler(self)
-            self.get_logger().info("TeleopControlNode mode=xbox (JoyInputHandler)")
-
-        self._tick_timer = self.create_timer(1.0 / 60.0, self._tick)
-
-        # Manual selection only: no periodic probing.
-
-    def destroy_node(self):  # type: ignore[override]
+    def destroy_node(self) -> bool:  # type: ignore[override]
         try:
-            if isinstance(self.input_handler, HandInputHandler):
-                self.input_handler.destroy()
+            self.arm_ctrl.stop()
+        except Exception:
+            pass
+        try:
+            self.gripper_ctrl.stop()
         except Exception:
             pass
         return super().destroy_node()
-
-    def _tick(self) -> None:
-        # Deadman first: immediate stop if not active
-        if not self.input_handler.is_active():
-            stop = TwistStamped()
-            stop.header.stamp = self.get_clock().now().to_msg()
-            stop.header.frame_id = self.target_frame_id
-            stop.twist.linear.x = 0.0
-            stop.twist.linear.y = 0.0
-            stop.twist.linear.z = 0.0
-            stop.twist.angular.x = 0.0
-            stop.twist.angular.y = 0.0
-            stop.twist.angular.z = 0.0
-            self.twist_pub.publish(stop)
-            return
-
-        cmd = self.input_handler.get_command()
-        if isinstance(cmd, PoseStamped):
-            self.pose_pub.publish(cmd)
-        elif isinstance(cmd, TwistStamped):
-            self.twist_pub.publish(cmd)
-
-        gripper = self.input_handler.get_gripper_state()
-        if gripper is not None:
-            self._publish_gripper(float(gripper))
-
-    def _publish_gripper(self, cmd: float) -> None:
-        # Guard against invalid values from upstream (NaN/inf).
-        try:
-            cmd_f = float(cmd)
-        except Exception:
-            return
-        if not math.isfinite(cmd_f):
-            return
-
-        cmd_clamped = float(clamp(cmd_f, 0.0, 1.0))
-        if self.gripper_step and self.gripper_step > 0:
-            step = float(self.gripper_step)
-            quantized = round(cmd_clamped / step) * step
-            quantized = float(clamp(quantized, 0.0, 1.0))
-        else:
-            # gripper_step<=0: continuous control (no quantization)
-            quantized = cmd_clamped
-
-        # Default behavior: if command didn't change, don't republish or re-dispatch.
-        force_republish = False
-        if self._selected_end_effector == "robotiq":
-            iface = str(self.get_parameter("robotiq_command_interface").value).strip().lower()
-            if iface in {"action", "position", "pos"}:
-                force_republish = bool(self.get_parameter("robotiq_action_force_republish").value)
-
-        if not force_republish:
-            if self._last_gripper_pub_cmd is not None and abs(quantized - self._last_gripper_pub_cmd) < 1e-9:
-                return
-            self._last_gripper_pub_cmd = quantized
-
-        msg = Float32()
-        msg.data = quantized
-        self.gripper_pub.publish(msg)
-        self._dispatch_gripper_to_end_effector(quantized)
-
-    def _setup_robotiq_action_client_best_effort(self) -> None:
-        """Try to create a Robotiq action client if message types are available."""
-        try:
-            from robotiq_2f_gripper_msgs.action import MoveTwoFingerGripper  # type: ignore
-
-            action_name = str(self.get_parameter("robotiq_action_name").value)
-            self._robotiq_action_goal_type = MoveTwoFingerGripper
-            self._robotiq_action_client = ActionClient(self, MoveTwoFingerGripper, action_name)
-        except Exception:
-            self._robotiq_action_goal_type = None
-            self._robotiq_action_client = None
-
-    def _robotiq_server_ready(self) -> bool:
-        if self._robotiq_action_client is None:
-            return False
-        try:
-            return bool(self._robotiq_action_client.server_is_ready())
-        except Exception:
-            return False
-
-    def _robotiq_topic_available(self) -> bool:
-        """Detect Robotiq presence by checking if its command topic exists in the ROS graph."""
-        topic = str(self.get_parameter("robotiq_binary_topic").value)
-        try:
-            names_and_types = self.get_topic_names_and_types()
-            return any(name == topic for name, _types in names_and_types)
-        except Exception:
-            return False
-
-    def _qb_ready(self) -> bool:
-        try:
-            if self._qb_client.service_is_ready():
-                return True
-            return bool(self._qb_client.wait_for_service(timeout_sec=0.0))
-        except Exception:
-            return False
-
-    def _select_end_effector(self, initial: bool = False) -> None:
-        desired = self._end_effector_param
-
-        selected = "publish_only"
-        if desired == "robotiq":
-            # Forced mode: keep selection even if backend isn't ready yet.
-            selected = "robotiq"
-        elif desired == "qbsofthand":
-            # Forced mode: keep selection even if service isn't ready yet.
-            selected = "qbsofthand"
-
-        if selected != self._selected_end_effector:
-            self._selected_end_effector = selected
-            self.get_logger().info(
-                f"End-effector backend selected: {self._selected_end_effector} (param={self._end_effector_param})"
-            )
-
-        if initial and self._selected_end_effector == "robotiq" and self._robotiq_action_client is None:
-            self.get_logger().warn(
-                "Robotiq action message type not available in this Python env; will use binary topic fallback. "
-                "(Build & source the workspace overlay if you want action-based continuous control.)"
-            )
-
-    def _dispatch_gripper_to_end_effector(self, closure: float) -> None:
-        if self._selected_end_effector == "qbsofthand":
-            self._call_qb_service(closure)
-            return
-        if self._selected_end_effector == "robotiq":
-            iface = str(self.get_parameter("robotiq_command_interface").value).strip().lower()
-            if iface in {"confidence", "confidence_topic", "topic"}:
-                self._pub_robotiq_confidence(closure)
-                return
-            if iface in {"binary", "binary_topic"}:
-                self._pub_robotiq_binary(closure)
-                return
-
-            # action (position control)
-            if iface in {"action", "position", "pos"}:
-                if self._robotiq_action_client is not None and self._robotiq_action_goal_type is not None:
-                    self._send_robotiq_action(closure)
-                else:
-                    # Best-effort fallback when action message type isn't available in this Python env.
-                    self._pub_robotiq_binary(closure)
-                return
-
-    def _call_qb_service(self, closure: float) -> None:
-        closure = float(clamp(closure, 0.0, 1.0))
-        now_ns = self.get_clock().now().nanoseconds
-        if self._last_gripper_cmd is not None:
-            # Don't resend the same command just because time has passed.
-            if abs(closure - self._last_gripper_cmd) < self._gripper_delta_threshold:
-                return
-            # If the command changed, still limit the update rate.
-            if now_ns - self._last_gripper_call_ns < self._gripper_min_interval_ns:
-                return
-        if not self._qb_ready():
-            return
-        request = SetClosure.Request()
-        request.closure = closure
-        request.duration_sec = self.gripper_duration_sec
-        request.speed_ratio = self.gripper_speed_ratio
-        try:
-            self._qb_client.call_async(request)
-            self._last_gripper_cmd = closure
-            self._last_gripper_call_ns = now_ns
-        except Exception as exc:  # pragma: no cover - best effort
-            self.get_logger().warn(f"SoftHand call failed: {exc}")
-
-    def _send_robotiq_action(self, closure: float) -> None:
-        if self._robotiq_action_client is None or self._robotiq_action_goal_type is None:
-            return
-        if not self._robotiq_server_ready():
-            return
-
-        closure = float(clamp(closure, 0.0, 1.0))
-        now_ns = self.get_clock().now().nanoseconds
-
-        min_interval_ns = int(float(self.get_parameter("robotiq_min_goal_interval_sec").value) * 1e9)
-        delta_threshold = float(self.get_parameter("robotiq_delta_threshold").value)
-        if self._robotiq_last_cmd is not None:
-            # Don't resend the same goal just because the button is held.
-            if abs(closure - self._robotiq_last_cmd) <= delta_threshold:
-                return
-            # If goal changed, still limit update rate.
-            if now_ns - self._robotiq_last_call_ns < min_interval_ns:
-                return
-
-        open_pos = float(self.get_parameter("robotiq_open_position_m").value)
-        close_pos = float(self.get_parameter("robotiq_close_position_m").value)
-        speed = float(clamp(float(self.get_parameter("robotiq_speed").value), 0.0, 1.0))
-        force = float(clamp(float(self.get_parameter("robotiq_force").value), 0.0, 1.0))
-
-        # closure=0 -> open_pos, closure=1 -> close_pos
-        target = open_pos + (close_pos - open_pos) * closure
-        # Keep in-range even if user configured open/close inversely
-        lo = min(open_pos, close_pos)
-        hi = max(open_pos, close_pos)
-        target = float(clamp(target, lo, hi))
-
-        goal = self._robotiq_action_goal_type.Goal()  # type: ignore[attr-defined]
-        goal.target_position = float(target)
-        goal.target_speed = float(speed)
-        goal.target_force = float(force)
-
-        try:
-            self._robotiq_action_client.send_goal_async(goal)
-            self._robotiq_last_cmd = closure
-            self._robotiq_last_call_ns = now_ns
-        except Exception as exc:  # pragma: no cover
-            self.get_logger().warn(f"Robotiq action send_goal failed: {exc}")
-
-    def _pub_robotiq_binary(self, closure: float) -> None:
-        # Fallback: publish +/-1.0 to binary_command
-        closure = float(clamp(closure, 0.0, 1.0))
-
-        now_ns = self.get_clock().now().nanoseconds
-        min_interval_ns = int(float(self.get_parameter("robotiq_min_goal_interval_sec").value) * 1e9)
-        delta_threshold = float(self.get_parameter("robotiq_delta_threshold").value)
-        if self._robotiq_last_cmd is not None:
-            if abs(closure - self._robotiq_last_cmd) < delta_threshold:
-                return
-            if now_ns - self._robotiq_last_call_ns < min_interval_ns:
-                return
-
-        thr = float(clamp(float(self.get_parameter("robotiq_binary_threshold").value), 0.0, 1.0))
-        val = -1.0 if closure >= thr else 1.0  # -1 close, +1 open
-        msg = Float32MultiArray()
-        msg.data = [float(val)]
-        self._robotiq_binary_pub.publish(msg)
-
-        self._robotiq_last_cmd = closure
-        self._robotiq_last_call_ns = now_ns
-
-    def _pub_robotiq_confidence(self, closure: float) -> None:
-        # confidence_command expects a Float32MultiArray with one value in [-1, 1].
-        # Positive -> open, negative -> close. Driver applies hysteresis.
-        closure = float(clamp(closure, 0.0, 1.0))
-
-        now_ns = self.get_clock().now().nanoseconds
-        min_interval_ns = int(float(self.get_parameter("robotiq_min_goal_interval_sec").value) * 1e9)
-        delta_threshold = float(self.get_parameter("robotiq_delta_threshold").value)
-        if self._robotiq_last_cmd is not None:
-            if abs(closure - self._robotiq_last_cmd) < delta_threshold:
-                return
-            if now_ns - self._robotiq_last_call_ns < min_interval_ns:
-                return
-
-        confidence = float(clamp(1.0 - 2.0 * closure, -1.0, 1.0))
-        msg = Float32MultiArray()
-        msg.data = [confidence]
-        self._robotiq_confidence_pub.publish(msg)
-
-        self._robotiq_last_cmd = closure
-        self._robotiq_last_call_ns = now_ns
-
-    def _on_params(self, params):
-        # Allow runtime switching via `ros2 param set`.
-        ee_updates = [p for p in params if p.name == "end_effector"]
-        if ee_updates:
-            v = ee_updates[0].value
-            if isinstance(v, str):
-                vv = v.strip().lower()
-                if vv == "auto":
-                    vv = "qbsofthand"
-                if vv in {"qbsofthand", "robotiq"}:
-                    self._end_effector_param = vv
-                    self._select_end_effector()
-                    return SetParametersResult(successful=True)
-                return SetParametersResult(successful=False, reason="invalid end_effector")
-            return SetParametersResult(successful=False, reason="end_effector must be string")
-        return SetParametersResult(successful=True)
 
 
 def main(args=None) -> None:
@@ -485,16 +214,9 @@ def main(args=None) -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            node.destroy_node()
-        except Exception:
-            pass
-        try:
-            if rclpy.ok():
-                rclpy.shutdown()
-        except Exception:
-            pass
-        cv2.destroyAllWindows()
+        node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

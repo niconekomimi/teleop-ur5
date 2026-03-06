@@ -1,35 +1,28 @@
 data_collector:
   ros__parameters:
     # ==========================================================
-    # 1) 输出文件与采样频率
+    # 1) 输出与采样
     # ==========================================================
-    # 采集到的 LIBERO / robomimic 结构 HDF5 文件路径
     output_path: "/home/rvl/collect_datasets_ws/data/libero_demos.hdf5"
-    # Timer 触发的默认采样频率（Hz）
     record_fps: 10.0
+    # <= 0 时关闭周期统计输出。
+    stats_period_sec: 2.0
 
     # ==========================================================
-    # 2) 相机输入与角色映射
+    # 2) 相机来源
     # ==========================================================
-    # 给两种物理相机分配角色：全局相机（agentview）和手腕相机（eye_in_hand）
-    # 节点会直接通过官方 SDK 主动拉帧，不再依赖 ROS 图像 topic。
-    # 可选值："realsense" | "oakd"
+    # realsense | oakd
     global_camera_source: "realsense"
     wrist_camera_source: "oakd"
 
     # ==========================================================
-    # 3) 机械臂状态与关节顺序
+    # 3) 机器人状态输入
     # ==========================================================
     joint_states_topic: "/joint_states"
-    # 末端位姿（绝对位姿），用于写入 robot0_eef_pos/quat 和 actions
-    # UR 官方驱动常见为：/tcp_pose_broadcaster/pose
-    # 如果你有自己发布的末端位姿话题，再改成你的 topic
+
     tool_pose_topic: "/tcp_pose_broadcaster/pose"
 
-    # 关节顺序：
-    # - 用于写入 obs/robot0_joint_pos (6 维)
-    # - 用于 go_home 回零时的 JointTrajectory.joint_names
-    # 要确保这里的名字能在 /joint_states.name 里找到（否则会一直跳过采样）
+    # 必须与 /joint_states.name 中的关节名一致。
     joint_names:
       - shoulder_pan_joint
       - shoulder_lift_joint
@@ -39,74 +32,54 @@ data_collector:
       - wrist_3_joint
 
     # ==========================================================
-    # 4) 末端执行器与夹爪状态
+    # 4) 夹爪状态选择
     # ==========================================================
-    # 末端类型：
-    # - robotic_gripper：通常有独立的状态 topic（Float32 0~1）
-    # - qbsofthand：本工程的 qbsofthand_control 主要靠 service 控制，没有稳定的“状态话题”
-    #   因此默认用 /gripper/cmd 作为“状态代理”（数据集标签通常够用）
-    # 可选值："robotic_gripper" | "qbsofthand"
+    # robotic_gripper | qbsofthand
     end_effector_type: "robotic_gripper"
 
-    # 可选：强制指定夹爪状态 topic（消息类型 Float32，范围 [0,1]）
-    # 留空则根据 end_effector_type 自动选择下面的默认值
+    # 留空则按 end_effector_type 自动选择。
     gripper_state_topic: "/gripper/cmd"
 
-    # 当 gripper_state_topic 为空时使用：
     robotic_gripper_state_topic: "/gripper/state"
-    # qbsofthand：用命令作为状态代理（teleop 通常会发布 /gripper/cmd Float32）
     qbsofthand_state_topic: "/gripper/cmd"
 
-    # 是否“强制要求”必须收到 gripper 消息才采样：
-    # - true：没收到/太旧就丢帧（更严格）
-    # - false：没收到就先按 0.0 写入（更适合 qbsofthand 这种没有稳定状态话题的情况）
+    # true: 丢帧；false: 缺失时回退为 0.0。
     require_gripper: false
 
     # ==========================================================
-    # 5) 时效约束
+    # 5) 时间戳有效性
     # ==========================================================
-    # tool_pose 允许的“最大时间差”（相对于采样时刻，超过则丢弃该帧）
     pose_max_age_sec: 0.05
-    # gripper 允许的“最大年龄”（相对于当前时间，超过则丢弃该帧）
     gripper_max_age_sec: 0.5
-    # 某些位姿发布器可能给出零时间戳；开启后会以当前采样时刻作为参考。
+    # 位姿时间戳为零时，使用当前采样时刻作为参考。
     pose_stamp_zero_is_ref: true
 
     # ==========================================================
-    # 6) 图像处理与写盘参数
+    # 6) 图像处理与写盘
     # ==========================================================
-    # 图像会做：中心裁剪成正方形 -> resize 到 obs_image_size
-    # 注意：为了严格兼容 LIBERO / robomimic，节点内部会强制使用 224
+    # 节点内部会强制使用 224。
     obs_image_size: 224
 
-    # HDF5 图像数据集压缩：
-    # - "lzf"：速度快（推荐）
-    # - "gzip"：更省空间但更吃 CPU
-    # - "none"：不压缩（占空间大，但在某些机器上写入更稳定）
+    # lzf | gzip | none
     image_compression: "gzip"
 
-    # 生产者-消费者队列大小：队列满会丢帧（不会阻塞回调）
+    # 队列满时会丢帧，不阻塞回调线程。
     queue_maxsize: 400
-    # 写盘线程批量写入的 batch 大小（越大越省开销，但占内存更多）
     writer_batch_size: 32
-    # 每写入多少帧 flush 一次（降低断电丢数据风险，代价是更多 I/O）
     writer_flush_every_n: 200
 
     # ==========================================================
-    # 7) 一键回初始位姿（go_home）
+    # 7) Go Home 与控制器切换
     # ==========================================================
-    # go_home 服务会向这个 topic 发布 JointTrajectory
-    # UR 驱动常见：/scaled_joint_trajectory_controller/joint_trajectory
     home_joint_trajectory_topic: "/scaled_joint_trajectory_controller/joint_trajectory"
-    # 回零轨迹的到达时间（秒）
     home_duration_sec: 3.0
-
-    # 你人为设置的“Home 位置（拍照点）关节角”（单位：rad，必须 6 个数，对应 joint_names 顺序）
-    # shoulder_pan_joint, shoulder_lift_joint, elbow_joint, wrist_1_joint, wrist_2_joint, wrist_3_joint
+    # 单位 rad，顺序与 joint_names 一致。
     home_joint_positions: [1.524178, -2.100060, 1.864580, -1.345048, -1.575888, 1.528195]
+    teleop_controller: "forward_position_controller"
+    trajectory_controller: "scaled_joint_trajectory_controller"
 
     # ==========================================================
-    # 8) 交互控制
+    # 8) 可选键盘控制
     # ==========================================================
-    # 可选：启用终端键盘控制（r 开始录制，s 停止，q 退出；需要按回车）
+    # r: 开始录制，s: 停止录制，q: 退出；需要回车确认。
     enable_keyboard: false

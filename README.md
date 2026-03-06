@@ -1,99 +1,288 @@
-# teleop-ur5
-# 本项目是一个基于 MediaPipe 的手势识别控制 UR5+SoftHand 的项目
+## teleop-ur5
 
-## 快速启动
+面向 UR5 的遥操作与数据采集系统，支持多输入控制、多末端执行器和多机器人控制器切换。
+
+这个项目的核心不是单一 demo，而是一套可切换、可扩展的控制系统：
+
+- 多输入控制器：`joy` / `mediapipe`
+- 多末端执行器：`robotiq` / `qbsofthand`
+- 多机器人控制器协同：`forward_position_controller` / `scaled_joint_trajectory_controller`
+- 数据采集：`data_collector_node`
+
+当前默认模式：
+
+- 输入：`joy`
+- 夹爪：`robotiq`
+- 机械臂输出：MoveIt Servo `TwistStamped`
+
+## Overview
+
+系统主入口：`src/teleop_control_py/launch/control_system.launch.py`
+
+主链路是一个分层控制系统：输入策略负责把设备信号转成统一控制语义，`teleop_control_node` 负责调度，内部输出层负责控制器切换和 Servo 启动，最终由 UR 控制器执行。
+
+### Capability Matrix
+
+| 维度 | 当前支持 | 说明 |
+| --- | --- | --- |
+| 输入后端 | `joy`, `mediapipe` | 通过 `input_type` 切换 |
+| 末端执行器 | `robotiq`, `qbsofthand` | 通过 `gripper_type` 切换 |
+| 机器人输出 | MoveIt Servo `TwistStamped` | 输出到 `/servo_node/delta_twist_cmds` |
+| 控制器协同 | `forward_position_controller`, `scaled_joint_trajectory_controller` | 支持 Teleop / 轨迹控制器分工 |
+| 数据采集 | 全局相机、腕部相机、机器人状态、夹爪状态 | `data_collector_node` 负责统一采集 |
+
+## System Architecture
+
+```mermaid
+flowchart LR
+    subgraph Inputs[Input Backends]
+        Joy[Joystick / Xbox]
+        MP[MediaPipe Hand Pose]
+    end
+
+    subgraph Teleop[teleop_control_node]
+        IH[InputHandler]
+        Core[Control Loop\nvelocity limit / deadzone / smoothing]
+        GC[GripperController]
+        Arm[ServoPoseFollower\ninternal arm output layer]
+    end
+
+    subgraph Motion[Robot Motion Stack]
+        Servo[MoveIt Servo]
+        FC[forward_position_controller]
+        TC[scaled_joint_trajectory_controller]
+        UR[UR5]
+    end
+
+    subgraph EE[End Effectors]
+        RQ[Robotiq 2F]
+        QB[qb SoftHand]
+    end
+
+    subgraph Data[Data Collection]
+        Cam[Camera SDK Clients]
+        Rec[data_collector_node]
+        Dataset[Episode Dataset]
+    end
+
+    Joy --> IH
+    MP --> IH
+    IH --> Core
+    Core --> Arm
+    Core --> GC
+    Arm -->|TwistStamped| Servo
+    Servo --> FC --> UR
+    TC --> UR
+    GC --> RQ
+    GC --> QB
+    UR --> Rec
+    RQ --> Rec
+    QB --> Rec
+    Cam --> Rec --> Dataset
+```
+
+架构上有两个关键点：
+
+- `teleop_control_node` 是主控节点，输入解析、速度限制、夹爪控制和机械臂输出都在这里统一调度。
+- `ServoPoseFollower` 在当前主路径中是内部输出层，不必单独启动；独立 `servo_pose_follower` 更适合调试或单独验证 Twist 转发链路。
+
+### Backend Comparison
+
+| 类别 | 选项 | 接口形态 | 适用场景 | 当前状态 |
+| --- | --- | --- | --- | --- |
+| 输入后端 | `joy` | `/joy` | 低延迟人工遥操作 | 默认方案 |
+| 输入后端 | `mediapipe` | `/mediapipe/hand_pose` | 手势驱动实验 | 依赖外部手势节点 |
+| 末端执行器 | `robotiq` | `Float32MultiArray` 话题 | 二指夹爪采集/抓取 | 已按当前驱动接口对齐 |
+| 末端执行器 | `qbsofthand` | `SetClosure` 服务优先 | 柔性手抓取 | 已接入统一接口 |
+| 机器人控制器 | `forward_position_controller` | Servo Teleop 输出 | 实时遥操作 | Teleop 主控制器 |
+| 机器人控制器 | `scaled_joint_trajectory_controller` | 轨迹执行 | 回零、规划轨迹 | 与采集流程配合 |
+
+## Repository Layout
+
+- 主启动：`src/teleop_control_py/launch/control_system.launch.py`
+- 仅 teleop 启动：`src/teleop_control_py/launch/teleop_control.launch.py`
+- 遥操作配置：`src/teleop_control_py/config/teleop_params.yaml`
+- 数据采集配置：`src/teleop_control_py/config/data_collector_params.yaml`
+- 手柄驱动配置：`src/multi_joy_driver/config/joy_driver_params.yaml`
+
+## Getting Started
+
+### 1. Build
+
 ```bash
-# 启动整个控制系统（手、机械臂、相机）
+python -m colcon build --packages-select teleop_control_py
+source install/setup.bash
+```
+
+### 2. Start The Full System
+
+```bash
 ros2 launch teleop_control_py control_system.launch.py
 ```
 
+这个 launch 会按配置自动组合：
 
-### 3）启动时使用（手动选择）
+- UR 驱动
+- MoveIt / Servo
+- 手柄驱动或 RealSense
+- Robotiq 或 qbSoftHand 驱动
+- `teleop_control_node`
 
-- 显式指定：
+### 3. Common Launch Variants
+
+手柄 + Robotiq：
 
 ```bash
-ros2 launch teleop_control_py control_system.launch.py end_effector:=robotiq robotiq_serial_port:=/dev/robotiq_gripper
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=joy \
+    gripper_type:=robotiq \
+    robotiq_serial_port:=/dev/robotiq_gripper
 ```
 
-## 激活环境
-    sudo apt install python3-venv
-    python3 -m venv ~/clds --system-site-packages
-    source ~/clds/bin/activate
+手柄 + qbSoftHand：
 
-**VSCode 自动激活**：本工作区已配置自动激活环境。新打开的终端会自动执行：
-- Python 虚拟环境 `~/clds`
-- ROS2 Humble
-- 当前工作区的 `install/setup.bash`
-
-## 需要安装
- - ur 驱动  
- - realsence 驱动   
- - oak 驱动 
-
-### 依赖安装
-
-#### ur驱动
-参考https://github.com/UniversalRobots/Universal_Robots_ROS2_Driver/tree/humble?tab=readme-ov-file
-
-#### realsence驱动
-
-##### 第一步
 ```bash
-    # 1. 安装必要的工具
-    sudo apt-get install -y curl gnupg2 lsb-release
-
-    # 2. 建立密钥目录
-    sudo mkdir -p /etc/apt/keyrings
-
-    # 3. 下载并注册 Intel 的公钥
-    curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null
-
-    # 4. 将 Intel 仓库添加到你的源列表中
-    echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/librealsense.list
-
-    # 5. 更新源
-    sudo apt-get update
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=joy \
+    gripper_type:=qbsofthand
 ```
-##### 第二步
+
+MediaPipe + Robotiq：
+
 ```bash
-    # 1. 安装底层驱动和调试工具 (realsense-viewer)
-    sudo apt-get install -y librealsense2-dkms librealsense2-utils
-
-    # 2. 安装 ROS 2 Humble 的 RealSense 驱动包
-    sudo apt-get install -y ros-humble-realsense2-camera
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=mediapipe \
+    gripper_type:=robotiq
 ```
-#### 其它依赖安装
+
+说明：`input_type:=mediapipe` 时，当前 teleop 节点实际消费的是 `/mediapipe/hand_pose`，因此仍需要外部节点发布该话题。
+
+### 4. Start Teleop Only
+
+如果 UR、MoveIt、夹爪驱动都已单独启动：
+
 ```bash
-    pip install -r requirements.txt
+ros2 launch teleop_control_py teleop_control.launch.py
 ```
 
-## Teleop 控制包
-- 包路径：src/teleop_control_py
-- 主要节点：teleop_control_node（输入 RealSense 图像，输出末端位姿 PoseStamped 到 /target_pose，夹爪 Float32 到 /gripper/cmd）
-- 默认参数：config/teleop_params.yaml（话题名、缩放、轴映射、低通 alpha、捏合阈值、夹爪距离映射）
+## Control Backends
 
-### 构建与运行
+### Input Controllers
+
+- `joy`: 面向 Xbox / 通用手柄输入
+- `mediapipe`: 面向外部手势估计结果输入
+
+当前默认 Xbox 映射：
+
+- 左摇杆：平移
+- 右摇杆：旋转
+- `A / B`：Z 方向
+- `X / Y`：绕 Z 轴
+- `LB / RB`：夹爪开合
+
+当前实现已经修正：
+
+- 松手后对应轴直接回零
+- 手柄与夹爪命令链路已和当前驱动对齐
+
+### End Effectors
+
+Robotiq 默认使用：
+
+- `robotiq_command_interface: confidence_topic`
+- 话题：`/robotiq_2f_gripper/confidence_command`
+
+语义：
+
+- 正数打开
+- 负数闭合
+
+qbSoftHand 默认优先使用服务：
+
+- `/qbsofthand_control_node/set_closure`
+
+### Robot Controllers
+
+当前系统支持在以下机器人控制器之间协同工作：
+
+- `forward_position_controller`: 遥操作 / Servo 输出控制器
+- `scaled_joint_trajectory_controller`: 轨迹执行与 `go_home` 控制器
+
+`teleop_control_node` 与 `data_collector_node` 都已经按当前配置支持控制器切换相关参数。
+
+### Launch Behavior
+
+当前总启动文件会按参数自动组合系统组件：
+
+| 条件 | 行为 |
+| --- | --- |
+| `input_type=joy` | 启动 `multi_joy_driver` |
+| `input_type=mediapipe` 且 `enable_camera=true` | 启动 RealSense 链路 |
+| `enable_moveit=true` | 启动 MoveIt / Servo |
+| `gripper_type=robotiq` | 启动 Robotiq 驱动 |
+| `gripper_type=qbsofthand` | 启动 qbSoftHand 驱动 |
+
+## Data Collection
+
+启动：
+
 ```bash
-# 构建（只构建本包）
-# 注意：即使你激活了 venv，`colcon` 也可能仍然指向系统的 /usr/bin/colcon（系统 Python）。
-# 为了让生成的 Python 可执行脚本绑定到当前 venv（从而能用到 venv 里 pip 安装的依赖），建议统一用：
-python -m colcon build --packages-select teleop_control_py
-source install/setup.bash
-
-# 运行，自动加载默认参数
-ros2 launch teleop_control_py teleop_control.launch.py 
-
-# 如需覆盖参数，例如切换图像话题或缩放
-ros2 launch teleop_control_py teleop_control.launch.py \
-    params_file:=src/teleop_control_py/config/teleop_params.yaml \
-    image_topic:=/camera/camera/color/image_raw \
-    scale_factor:=0.3
+ros2 run teleop_control_py data_collector_node \
+    --ros-args \
+    --params-file src/teleop_control_py/config/data_collector_params.yaml
 ```
 
-### 控制逻辑概述
-- Deadman：支持两种来源，默认“捏合或空格”。可在 YAML 将 `use_pinch_deadman` 设为 `false`，改为“仅空格”；此时捏合只控制夹爪，不再作为安全开关。
-- 相对控制：Deadman 激活时记录初始手腕位置与机器人位姿，之后用手腕增量经轴映射与缩放得到 TCP 目标。
-- 平滑：位置使用指数低通，alpha 越小越平滑。
-- 夹爪：拇指-食指距离 20px→闭合，100px→张开，线性映射。
+控制服务：
+
+```bash
+ros2 service call /data_collector/start std_srvs/srv/Trigger {}
+ros2 service call /data_collector/stop std_srvs/srv/Trigger {}
+ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
+```
+
+当前 `data_collector_node`：
+
+- 直接通过 SDK 拉取相机图像
+- 不依赖 ROS 图像话题采样
+- 通过 ROS 订阅读取关节、TCP 位姿、夹爪状态
+
+## Configuration
+
+常改文件：`src/teleop_control_py/config/teleop_params.yaml`
+
+- `input_type`: `joy | mediapipe`
+- `gripper_type`: `robotiq | qbsofthand`
+- `joy_deadzone`
+- `joy_curve`
+- `max_linear_vel`
+- `max_angular_vel`
+- `max_linear_accel`
+- `max_angular_accel`
+- `teleop_controller`
+- `trajectory_controller`
+
+常改文件：`src/teleop_control_py/config/data_collector_params.yaml`
+
+- `output_path`
+- `global_camera_source`
+- `wrist_camera_source`
+- `end_effector_type`
+- `home_joint_positions`
+
+## Dependencies
+
+至少需要：
+
+- UR 驱动
+- MoveIt Servo
+- RealSense 相关依赖
+- OAK / DepthAI 相关依赖
+- Robotiq 或 qbSoftHand 驱动
+
+Python 依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
 

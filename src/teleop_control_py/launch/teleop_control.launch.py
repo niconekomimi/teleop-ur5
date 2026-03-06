@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import ExecuteProcess
 from launch.actions import LogInfo
 from launch.actions import OpaqueFunction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
-from ament_index_python.packages import get_package_share_directory
 
 
 def _default_python_executable() -> str:
@@ -22,21 +22,20 @@ def _default_python_executable() -> str:
     return "python3"
 
 
-def _read_control_mode_from_params(params_file: str) -> str:
-    mode = "hand"
+def _load_teleop_params(params_file: str) -> dict:
     try:
         import yaml  # type: ignore
     except Exception:
-        return mode
+        return {}
 
     try:
         with open(params_file, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
     except Exception:
-        return mode
+        return {}
 
     if not isinstance(data, dict):
-        return mode
+        return {}
 
     for key in ("teleop_control_node", "/teleop_control_node"):
         block = data.get(key)
@@ -45,58 +44,88 @@ def _read_control_mode_from_params(params_file: str) -> str:
         params = block.get("ros__parameters")
         if not isinstance(params, dict):
             continue
-        cm = params.get("control_mode")
-        if isinstance(cm, str) and cm.strip():
-            return cm.strip().lower()
-    return mode
+        return params
+    return {}
 
 
-def _read_end_effector_from_params(params_file: str) -> str:
-    ee = "robotiq"
-    try:
-        import yaml  # type: ignore
-    except Exception:
-        return ee
+def _coerce_input_type(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "xbox":
+        return "joy"
+    if normalized == "hand":
+        return "mediapipe"
+    if normalized in ("joy", "mediapipe"):
+        return normalized
+    return ""
 
-    try:
-        with open(params_file, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-    except Exception:
-        return ee
 
-    if not isinstance(data, dict):
-        return ee
+def _coerce_gripper_type(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "auto":
+        return "qbsofthand"
+    if normalized in ("robotiq", "qbsofthand"):
+        return normalized
+    return ""
 
-    for key in ("teleop_control_node", "/teleop_control_node"):
-        block = data.get(key)
-        if not isinstance(block, dict):
-            continue
-        params = block.get("ros__parameters")
-        if not isinstance(params, dict):
-            continue
-        raw = params.get("end_effector")
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip().lower()
-    return ee
+
+def _resolve_input_type(params_file: str, input_type_override: str, control_mode_override: str) -> str:
+    resolved = _coerce_input_type(input_type_override)
+    if resolved:
+        return resolved
+
+    resolved = _coerce_input_type(control_mode_override)
+    if resolved:
+        return resolved
+
+    params = _load_teleop_params(params_file)
+    resolved = _coerce_input_type(str(params.get("input_type", "")))
+    if resolved:
+        return resolved
+
+    resolved = _coerce_input_type(str(params.get("control_mode", "")))
+    if resolved:
+        return resolved
+
+    return "joy"
+
+
+def _resolve_gripper_type(params_file: str, gripper_type_override: str, end_effector_override: str) -> str:
+    resolved = _coerce_gripper_type(gripper_type_override)
+    if resolved:
+        return resolved
+
+    resolved = _coerce_gripper_type(end_effector_override)
+    if resolved:
+        return resolved
+
+    params = _load_teleop_params(params_file)
+    resolved = _coerce_gripper_type(str(params.get("gripper_type", "")))
+    if resolved:
+        return resolved
+
+    resolved = _coerce_gripper_type(str(params.get("end_effector", "")))
+    if resolved:
+        return resolved
+
+    return "robotiq"
 
 
 def _launch_teleop_node(context, *args, **kwargs):
     params_file = LaunchConfiguration("params_file").perform(context)
-    override = LaunchConfiguration("control_mode").perform(context).strip().lower()
-    if override in ("hand", "xbox"):
-        resolved = override
-    else:
-        resolved = _read_control_mode_from_params(params_file)
-
-    ee_override = LaunchConfiguration("end_effector").perform(context).strip().lower()
-    if ee_override in ("auto", "qbsofthand", "robotiq"):
-        resolved_ee = ee_override
-    else:
-        resolved_ee = _read_end_effector_from_params(params_file)
+    resolved_input = _resolve_input_type(
+        params_file,
+        LaunchConfiguration("input_type").perform(context),
+        LaunchConfiguration("control_mode").perform(context),
+    )
+    resolved_gripper = _resolve_gripper_type(
+        params_file,
+        LaunchConfiguration("gripper_type").perform(context),
+        LaunchConfiguration("end_effector").perform(context),
+    )
 
     return [
-        LogInfo(msg=f"[teleop_control.launch] resolved control_mode: {resolved}"),
-        LogInfo(msg=f"[teleop_control.launch] resolved end_effector: {resolved_ee}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved input_type: {resolved_input}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved gripper_type: {resolved_gripper}"),
         ExecuteProcess(
             name="teleop_control_node",
             cmd=[
@@ -109,9 +138,9 @@ def _launch_teleop_node(context, *args, **kwargs):
                 "--params-file",
                 LaunchConfiguration("params_file"),
                 "-p",
-                f"control_mode:={resolved}",
+                f"input_type:={resolved_input}",
                 "-p",
-                f"end_effector:={resolved_ee}",
+                f"gripper_type:={resolved_gripper}",
             ],
             output="screen",
         ),
@@ -135,38 +164,38 @@ def generate_launch_description():
         description="Python executable used to run teleop_control_node (needs mediapipe)",
     )
 
+    input_type_arg = DeclareLaunchArgument(
+        "input_type",
+        default_value="",
+        description="Optional input backend override (joy|mediapipe). Empty means read from params_file.",
+    )
+
+    gripper_type_arg = DeclareLaunchArgument(
+        "gripper_type",
+        default_value="",
+        description="Optional gripper backend override (robotiq|qbsofthand). Empty means read from params_file.",
+    )
+
     control_mode_arg = DeclareLaunchArgument(
         "control_mode",
         default_value="",
-        description="Optional control mode override (hand|xbox). Empty means read from params_file.",
+        description="Deprecated alias for input_type (hand->mediapipe, xbox->joy).",
     )
 
     end_effector_arg = DeclareLaunchArgument(
         "end_effector",
         default_value="",
-        description="Optional end effector override (qbsofthand|robotiq; 'auto' is a deprecated alias for qbsofthand). Empty means read from params_file.",
+        description="Deprecated alias for gripper_type (auto->qbsofthand).",
     )
 
     return LaunchDescription(
         [
             params_file_arg,
             python_executable_arg,
+            input_type_arg,
+            gripper_type_arg,
             control_mode_arg,
             end_effector_arg,
-            
-            # 1. 手势识别节点
-            # executable 直接填写 setup.py 中 console_scripts 定义的名字
-            # 注意：console_scripts 生成的脚本 shebang 可能固定为 /usr/bin/python3。
-            # 这里用指定的 python 直接运行模块，确保使用你安装了 mediapipe 的解释器。
             OpaqueFunction(function=_launch_teleop_node),
-
-            # 2. 伺服跟随节点
-            Node(
-                package="teleop_control_py",
-                executable="servo_pose_follower",
-                name="servo_pose_follower",
-                output="screen",
-                parameters=[LaunchConfiguration("params_file")],
-            ),
         ]
     )

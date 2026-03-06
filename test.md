@@ -4,7 +4,7 @@
 
 ### 一键启动（默认：手柄控制）
 ```bash
-    ros2 launch teleop_control_py control_system.launch.py
+ros2 launch teleop_control_py control_system.launch.py
 ```
 
 ### 手势控制(调试)

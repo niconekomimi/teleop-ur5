@@ -1,146 +1,99 @@
 teleop_control_node:
   ros__parameters:
     # ==========================================================
-    # 1) 模式选择（Strategy）
+    # 1) 后端选择
     # ==========================================================
-    # hand: 视觉手势（MediaPipe）
-    # xbox: 手柄（/joy）
-    control_mode: "xbox"
+    # joy | mediapipe
+    input_type: "joy"
 
-    # ==========================================================
-    # 2) 通用话题 / 坐标系
-    # ==========================================================
-    target_frame_id: "base"  # 统一坐标系
-    gripper_cmd_topic: "/gripper/cmd"
-    target_pose_topic: "/target_pose"
+    # robotiq | qbsofthand
+    gripper_type: "robotiq"
+
+    control_hz: 50.0
 
     # ==========================================================
-    # 2.1) 末端执行器选择
+    # 2) 机械臂输出与运动限幅
     # ==========================================================
-    # qbsofthand: SoftHand（service: /qbsofthand_control_node/set_closure）
-    # robotiq: Robotiq（action: /robotiq_2f_gripper_action；若 action 类型不可用则退化为 binary topic）
-    # NOTE: 已移除自动检测，请手动设置 qbsofthand 或 robotiq。
-    end_effector: "robotiq"
+    target_frame_id: "base"
+    servo_twist_topic: "/servo_node/delta_twist_cmds"
 
-    # --- Robotiq 参数（仅在 robotiq 时生效） ---
-    # 扳机“按多少闭多少”（比例闭合）：用 action（position control）
-    robotiq_command_interface: "action"
-    # 如果你只需要开/关（不需要比例），可改为：confidence_topic 或 binary_topic
-    robotiq_confidence_topic: "/robotiq_2f_gripper/confidence_command"
-    robotiq_action_name: "/robotiq_2f_gripper_action"
-    robotiq_open_position_m: 0.14
-    robotiq_close_position_m: 0.0
-    robotiq_speed: 1.0
-    robotiq_force: 0.5
-    robotiq_min_goal_interval_sec: 0.0
-    robotiq_delta_threshold: 0.0
-    robotiq_binary_topic: "/robotiq_2f_gripper/binary_command"
-    robotiq_binary_threshold: 0.5
+    auto_start_servo: true
+    start_servo_service: "/servo_node/start_servo"
 
-    # 夹爪输入量化：0=连续（更跟手）；>0=台阶（更稳）
-    gripper_step: 0.0
+    auto_switch_controllers: true
+    controller_manager_ns: "/controller_manager"
+    teleop_controller: "forward_position_controller"
+    trajectory_controller: "scaled_joint_trajectory_controller"
+    startup_retry_period_sec: 1.0
 
-    # ==========================================================
-    # 3) Hand 模式（相机 / MediaPipe / 手-臂映射）
-    # ==========================================================
-    # --- 相机输入 ---
-    image_topic: "/camera/camera/color/image_raw"
-    depth_topic: "/camera/camera/aligned_depth_to_color/image_raw"
-    camera_info_topic: "/camera/camera/aligned_depth_to_color/camera_info"
-    robot_pose_topic: "/tcp_pose_broadcaster/pose"
-
-    # --- 手 -> 机器人位移映射 ---
-    scale_factor: 1.0       # 小范围动作更跟手
-    axis_mapping: [0, 1, 2] # 手坐标轴映射到机器人 XYZ
-    smoothing_alpha: 0.6    # 位移 EMA 滤波（越大越稳，滞后越大）
-
-    # --- 手的 3D 位置来源 ---
-    # depth: 严格 3D（深度反投影，单位米）
-    # normalized: 归一化坐标
-    # hybrid: 优先 depth，失败则回退 normalized
-    hand_position_source: "depth"
-    depth_unit_scale: 0.001
-    depth_min_m: 0.10
-    depth_max_m: 2.00
-
-    # --- 手的姿态映射 ---
-    orientation_mode: "hand_relative"  # lock | hand_relative
-    # mapping 是 [x,y,z] 分量重排；sign 每轴取反（>0 不反，<0 取反）
-    orientation_axis_mapping: [2, 0, 1]
-    orientation_axis_sign: [-1.0, 1.0, -1.0]
-
-    # --- Hand 模式夹爪（捏合距离）---
-    gripper_open_dist_px: 100.0
-    gripper_close_dist_px: 20.0
-    gripper_open_dist_m: 0.10
-    gripper_close_dist_m: 0.01
-
-    # ==========================================================
-    # 4) Deadman（通用）
-    # ==========================================================
-    # 空格 deadman：pynput 能检测“按住/松开”，松开立即停
-    space_deadman_backend: "pynput"  # pynput|opencv
-    space_deadman_hold_sec: 0.10     # 仅 opencv backend 使用
-
-    deadman_filter_enabled: true
-    deadman_engage_confirm_sec: 0.03
-    deadman_release_confirm_sec: 0.03
-    gripper_requires_deadman: true
-
-    # ==========================================================
-    # 5) Xbox 模式（/joy -> TwistStamped）
-    # ==========================================================
+    # 速度 / 加速度限幅；松手后对应轴直接回零。
     max_linear_vel: 1.5
     max_angular_vel: 3.0
-    joy_deadzone: 0.05
-    joy_deadman_enabled: false
+    max_linear_accel: 4.0
+    max_angular_accel: 8.0
 
-    # --- 按键映射 ---
+    # ==========================================================
+    # 3) Joy 手柄输入
+    # ==========================================================
+    joy_topic: "/joy"
+
+    # linear | cubic
+    joy_deadzone: 0.05
+    joy_curve: "linear"
+
+    joy_deadman_enabled: false
     deadman_button: -1
     deadman_axis: 4
     deadman_axis_threshold: 0.5
 
-    # 夹爪
-    # 注意：如果 gripper_axis >= 0，会优先用扳机轴并忽略按钮。
-    gripper_close_button: 5  # RB
-    gripper_open_button: 4   # LB
-    gripper_axis: -1
-
+    # 轴为 -1 时，改由按钮控制该自由度。
     linear_x_axis: 0
     linear_y_axis: 1
-    linear_z_axis: -1 
+    linear_z_axis: -1
+    linear_axis_sign: [-1.0, -1.0, 1.0]
+    linear_z_up_button: 1
+    linear_z_down_button: 0
 
     angular_x_axis: 3
     angular_y_axis: 2
     angular_z_axis: -1
+    angular_axis_sign: [-1.0, 1.0, 1.0]
+    angular_z_positive_button: 3
+    angular_z_negative_button: 2
 
-servo_pose_follower:
-  ros__parameters:
-    # ==========================================================
-    # Servo 跟随：Pose -> Twist（MoveIt Servo）
-    # ==========================================================
-    target_pose_topic: "/pose_target_cmds"
-    servo_twist_topic: "/servo_node/delta_twist_cmds"
-    planning_frame: "base"
-    ee_frame: "tool0"
-    
-    # PID 增益 (速度控制下可以适当激进一点)
-    linear_gain: 6.0
-    angular_gain: 6.0
-    max_linear_speed: 0.6      # m/s
-    max_angular_speed: 2.5     # rad/s
-    position_deadband: 0.0005
-    rotation_deadband: 0.002
-    command_rate_hz: 100.0
+    # gripper_axis >= 0 时优先使用轴控制。
+    gripper_close_button: 5
+    gripper_open_button: 4
+    gripper_axis: -1
+    gripper_axis_inverted: false
 
-    # 自动启动 Servo 逻辑
-    auto_start_servo: true
-    start_servo_service: "/servo_node/start_servo"
-    
-    # 自动切换控制器逻辑
-    auto_switch_controllers: true
-    controller_manager_ns: "/controller_manager"
-    activate_controller: "forward_position_controller"
-    deactivate_controllers: ["scaled_joint_trajectory_controller"]
-    switch_strictness: "best_effort"
-    startup_retry_period_sec: 1.0
+    # ==========================================================
+    # 4) MediaPipe 输入
+    # ==========================================================
+    # 消息格式：[vx, vy, vz, wx, wy, wz, gripper, optional_deadman]
+    mediapipe_topic: "/mediapipe/hand_pose"
+    mediapipe_deadzone: 0.02
+    mediapipe_linear_scale: 1.0
+    mediapipe_angular_scale: 1.0
+    mediapipe_linear_axis_mapping: [0, 1, 2]
+    mediapipe_angular_axis_mapping: [0, 1, 2]
+    mediapipe_linear_axis_sign: [1.0, 1.0, 1.0]
+    mediapipe_angular_axis_sign: [1.0, 1.0, 1.0]
+
+    # ==========================================================
+    # 5) 夹爪输出
+    # ==========================================================
+    gripper_cmd_topic: "/gripper/cmd"
+    gripper_command_delta: 0.01
+
+    # confidence_topic: [-1, 1]，正数打开，负数闭合
+    # binary_topic: 1.0 打开，-1.0 闭合
+    robotiq_command_interface: "confidence_topic"
+    robotiq_confidence_topic: "/robotiq_2f_gripper/confidence_command"
+    robotiq_binary_topic: "/robotiq_2f_gripper/binary_command"
+    robotiq_binary_threshold: 0.5
+
+    # 优先调用服务，/gripper/cmd 仍作为状态代理。
+    qbsofthand_service_name: "/qbsofthand_control_node/set_closure"
+    qbsofthand_duration_sec: 0.3
+    qbsofthand_speed_ratio: 1.0
