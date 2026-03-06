@@ -1,6 +1,6 @@
-## teleop-ur5
+## teleop-ur
 
-面向 UR5 的遥操作与数据采集系统，支持多输入控制、多末端执行器和多机器人控制器切换。
+面向 Universal Robots 多种机械臂型号的遥操作与数据采集系统，支持多输入控制、多末端执行器和多机器人控制器切换。
 
 这个项目的核心不是单一 demo，而是一套可切换、可扩展的控制系统：
 
@@ -30,6 +30,7 @@
 | 机器人输出 | MoveIt Servo `TwistStamped` | 输出到 `/servo_node/delta_twist_cmds` |
 | 控制器协同 | `forward_position_controller`, `scaled_joint_trajectory_controller` | 支持 Teleop / 轨迹控制器分工 |
 | 数据采集 | 全局相机、腕部相机、机器人状态、夹爪状态 | `data_collector_node` 负责统一采集 |
+| 安全保护 | 输入看门狗、速度/加速度限幅 | 防止输入断连与主机卡顿带来的残留运动 |
 
 ## System Architecture
 
@@ -51,7 +52,7 @@ flowchart LR
         Servo[MoveIt Servo]
         FC[forward_position_controller]
         TC[scaled_joint_trajectory_controller]
-        UR[UR5]
+        UR[UR Robot]
     end
 
     subgraph EE[End Effectors]
@@ -91,7 +92,7 @@ flowchart LR
 | 类别 | 选项 | 接口形态 | 适用场景 | 当前状态 |
 | --- | --- | --- | --- | --- |
 | 输入后端 | `joy` | `/joy` | 低延迟人工遥操作 | 默认方案 |
-| 输入后端 | `mediapipe` | `/mediapipe/hand_pose` | 手势驱动实验 | 依赖外部手势节点 |
+| 输入后端 | `mediapipe` | 图像话题输入 | 手势驱动实验 | teleop 节点内置 MediaPipe 手势识别 |
 | 末端执行器 | `robotiq` | `Float32MultiArray` 话题 | 二指夹爪采集/抓取 | 已按当前驱动接口对齐 |
 | 末端执行器 | `qbsofthand` | `SetClosure` 服务优先 | 柔性手抓取 | 已接入统一接口 |
 | 机器人控制器 | `forward_position_controller` | Servo Teleop 输出 | 实时遥操作 | Teleop 主控制器 |
@@ -128,7 +129,32 @@ ros2 launch teleop_control_py control_system.launch.py
 - Robotiq 或 qbSoftHand 驱动
 - `teleop_control_node`
 
-### 3. Common Launch Variants
+支持的 UR 机型由 `ur_type` 参数决定，GUI 中可手动输入，默认值为 `ur5`。常见可用值取决于当前 UR 驱动版本，通常包括 `ur3`、`ur5`、`ur10`、`ur16e`、`ur20`、`ur30` 以及对应的 e 系列型号。
+
+### 3. Start The GUI
+
+推荐在完成编译并 `source install/setup.bash` 后，通过包入口启动 GUI：
+
+```bash
+ros2 run teleop_control_py teleop_gui
+```
+
+如果你正在源码态调试，也可以继续使用薄入口脚本：
+
+```bash
+python3 scripts/teleop_gui.py
+```
+
+GUI 当前支持：
+
+- 启动 / 停止相机 ROS2 驱动
+- 启动 / 停止机械臂 ROS2 驱动
+- 启动整套 teleop 系统
+- 显示模块状态与硬件占用情况
+- 启动数据采集、录制、回 Home、设置当前 Home
+- 手动输入 `ur_type`，并在启动机械臂驱动或遥操作系统时自动覆盖 launch 参数
+
+### 4. Common Launch Variants
 
 手柄 + Robotiq：
 
@@ -155,9 +181,26 @@ ros2 launch teleop_control_py control_system.launch.py \
     gripper_type:=robotiq
 ```
 
-说明：`input_type:=mediapipe` 时，当前 teleop 节点实际消费的是 `/mediapipe/hand_pose`，因此仍需要外部节点发布该话题。
+说明：`input_type:=mediapipe` 时，当前 teleop 节点会直接订阅图像输入话题，并在节点内部完成 MediaPipe 手部识别。
 
-### 4. Start Teleop Only
+整套系统 + 数据采集：
+
+```bash
+ros2 launch teleop_control_py control_system.launch.py \
+    input_type:=joy \
+    gripper_type:=robotiq \
+    enable_data_collector:=true
+```
+
+如需覆盖采集配置文件：
+
+```bash
+ros2 launch teleop_control_py control_system.launch.py \
+    enable_data_collector:=true \
+    data_collector_params_file:=/absolute/path/to/data_collector_params.yaml
+```
+
+### 5. Start Teleop Only
 
 如果 UR、MoveIt、夹爪驱动都已单独启动：
 
@@ -170,7 +213,7 @@ ros2 launch teleop_control_py teleop_control.launch.py
 ### Input Controllers
 
 - `joy`: 面向 Xbox / 通用手柄输入
-- `mediapipe`: 面向外部手势估计结果输入
+- `mediapipe`: 面向图像输入的内置手势识别
 
 当前默认 Xbox 映射：
 
@@ -184,6 +227,8 @@ ros2 launch teleop_control_py teleop_control.launch.py
 
 - 松手后对应轴直接回零
 - 手柄与夹爪命令链路已和当前驱动对齐
+- 输入订阅使用 `SensorData QoS`，优先消费最新一帧输入而不是堆积旧消息
+- 默认启用输入看门狗：`input_watchdog_timeout_sec=0.2`，超过超时未收到新输入时强制输出零命令
 
 ### End Effectors
 
@@ -221,6 +266,7 @@ qbSoftHand 默认优先使用服务：
 | `enable_moveit=true` | 启动 MoveIt / Servo |
 | `gripper_type=robotiq` | 启动 Robotiq 驱动 |
 | `gripper_type=qbsofthand` | 启动 qbSoftHand 驱动 |
+| `enable_data_collector=true` | 启动 `data_collector_node`，并按 `gripper_type` 自动映射采集端 `end_effector_type` |
 
 ## Data Collection
 
@@ -245,6 +291,8 @@ ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
 - 直接通过 SDK 拉取相机图像
 - 不依赖 ROS 图像话题采样
 - 通过 ROS 订阅读取关节、TCP 位姿、夹爪状态
+- 订阅侧统一使用 `SensorData QoS`
+- 数据集 `action` 记录的是执行后的机器人状态 `[xyz, rotvec, gripper]`，由共享数学函数组装，不是原始手柄输入
 
 ## Configuration
 
@@ -254,6 +302,7 @@ ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
 - `gripper_type`: `robotiq | qbsofthand`
 - `joy_deadzone`
 - `joy_curve`
+- `input_watchdog_timeout_sec`
 - `max_linear_vel`
 - `max_angular_vel`
 - `max_linear_accel`
@@ -276,7 +325,7 @@ ros2 service call /data_collector/go_home std_srvs/srv/Trigger {}
 - UR 驱动
 - MoveIt Servo
 - RealSense 相关依赖
-- OAK / DepthAI 相关依赖
+- OAK-D / DepthAI 相关依赖
 - Robotiq 或 qbSoftHand 驱动
 
 Python 依赖：

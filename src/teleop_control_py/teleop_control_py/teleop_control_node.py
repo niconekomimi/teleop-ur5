@@ -82,6 +82,7 @@ class TeleopControlNode(Node):
         self.declare_parameter("max_angular_accel", 8.0)
 
         self.declare_parameter("joy_topic", "/joy")
+        self.declare_parameter("input_watchdog_timeout_sec", 0.2)
         self.declare_parameter("joy_deadzone", 0.05)
         self.declare_parameter("joy_curve", "linear")
         self.declare_parameter("joy_deadman_enabled", False)
@@ -105,7 +106,10 @@ class TeleopControlNode(Node):
         self.declare_parameter("gripper_axis", -1)
         self.declare_parameter("gripper_axis_inverted", False)
 
-        self.declare_parameter("mediapipe_topic", "/mediapipe/hand_pose")
+        self.declare_parameter("mediapipe_input_topic", "/camera/camera/color/image_raw")
+        self.declare_parameter("mediapipe_topic", "")
+        self.declare_parameter("mediapipe_depth_topic", "/camera/camera/aligned_depth_to_color/image_raw")
+        self.declare_parameter("mediapipe_camera_info_topic", "/camera/camera/aligned_depth_to_color/camera_info")
         self.declare_parameter("mediapipe_deadzone", 0.02)
         self.declare_parameter("mediapipe_linear_scale", 1.0)
         self.declare_parameter("mediapipe_angular_scale", 1.0)
@@ -113,6 +117,26 @@ class TeleopControlNode(Node):
         self.declare_parameter("mediapipe_angular_axis_mapping", [0, 1, 2])
         self.declare_parameter("mediapipe_linear_axis_sign", [1.0, 1.0, 1.0])
         self.declare_parameter("mediapipe_angular_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("mediapipe_hand_position_source", "hybrid")
+        self.declare_parameter("mediapipe_orientation_mode", "lock")
+        self.declare_parameter("mediapipe_orientation_axis_mapping", [0, 1, 2])
+        self.declare_parameter("mediapipe_orientation_axis_sign", [1.0, 1.0, 1.0])
+        self.declare_parameter("mediapipe_depth_min_m", 0.1)
+        self.declare_parameter("mediapipe_depth_max_m", 2.0)
+        self.declare_parameter("mediapipe_depth_unit_scale", 0.001)
+        self.declare_parameter("mediapipe_smoothing_alpha", 0.2)
+        self.declare_parameter("mediapipe_gripper_open_dist_px", 100.0)
+        self.declare_parameter("mediapipe_gripper_close_dist_px", 20.0)
+        self.declare_parameter("mediapipe_gripper_open_dist_m", 0.12)
+        self.declare_parameter("mediapipe_gripper_close_dist_m", 0.03)
+        self.declare_parameter("mediapipe_gripper_metric_hold_sec", 0.25)
+        self.declare_parameter("mediapipe_gripper_requires_deadman", True)
+        self.declare_parameter("mediapipe_deadman_filter_enabled", True)
+        self.declare_parameter("mediapipe_deadman_engage_confirm_sec", 0.10)
+        self.declare_parameter("mediapipe_deadman_release_confirm_sec", 0.03)
+        self.declare_parameter("mediapipe_space_deadman_backend", "opencv")
+        self.declare_parameter("mediapipe_space_deadman_hold_sec", 0.3)
+        self.declare_parameter("mediapipe_show_debug_window", True)
 
         self.declare_parameter("gripper_cmd_topic", "/gripper/cmd")
         self.declare_parameter("gripper_command_delta", 0.01)
@@ -195,6 +219,10 @@ class TeleopControlNode(Node):
         self.gripper_ctrl.set_gripper(gripper_val)
 
     def destroy_node(self) -> bool:  # type: ignore[override]
+        try:
+            self.input_handler.stop()
+        except Exception:
+            pass
         try:
             self.arm_ctrl.stop()
         except Exception:

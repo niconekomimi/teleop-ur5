@@ -4,8 +4,6 @@
 from __future__ import annotations
 
 import os
-import threading
-import time
 import warnings
 from typing import Optional
 
@@ -57,9 +55,11 @@ class OAKClient:
 
     def __init__(self, logger: Optional[object] = None) -> None:
         self._logger = logger
+        self._stopped = False
         os.environ.setdefault("DEPTHAI_SEARCH_TIMEOUT", "3000")
 
-        self._pipeline = dai.Pipeline()
+        self._device = dai.Device(dai.UsbSpeed.SUPER)
+        self._pipeline = dai.Pipeline(self._device)
         with warnings.catch_warnings():
             warnings.filterwarnings(
                 "ignore",
@@ -72,16 +72,15 @@ class OAKClient:
         color.setFps(30)
         color.setInterleaved(False)
         color.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+
         self._queue = color.video.createOutputQueue(maxSize=1, blocking=False)
+        self._pipeline.start()
 
-        self._pipeline_thread = threading.Thread(target=self._pipeline.run, daemon=True)
-        self._pipeline_thread.start()
-
-        deadline = time.monotonic() + 5.0
-        while not self._pipeline.isRunning():
-            if time.monotonic() > deadline:
-                raise RuntimeError("OAK-D pipeline 未在 5 秒内进入运行状态")
-            time.sleep(0.01)
+        usb_speed = self._device.getUsbSpeed()
+        self._log("info", f"OAK-D USB speed: {usb_speed.name}")
+        if not self._pipeline.isRunning():
+            self._device.close()
+            raise RuntimeError("OAK-D pipeline 启动失败")
 
     def _log(self, level: str, msg: str) -> None:
         if self._logger is None:
@@ -91,7 +90,11 @@ class OAKClient:
             log_fn(msg)
 
     def get_bgr_frame(self) -> Optional[np.ndarray]:
+        if self._stopped or getattr(self, "_queue", None) is None:
+            return None
         try:
+            if hasattr(self._queue, "isClosed") and self._queue.isClosed():
+                return None
             packet = self._queue.tryGet() if hasattr(self._queue, "tryGet") else None
             if packet is None:
                 return None
@@ -104,11 +107,16 @@ class OAKClient:
             return None
 
     def stop(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
+
         try:
-            self._pipeline.stop()
+            if hasattr(self._queue, "close"):
+                self._queue.close()
         except Exception as exc:  # noqa: BLE001
-            self._log("warn", f"关闭 OAK-D 失败: {exc!r}")
-        try:
-            self._pipeline_thread.join(timeout=1.0)
-        except Exception:
-            pass
+            self._log("warn", f"关闭 OAK-D 输出队列失败: {exc!r}")
+
+        self._queue = None
+        self._pipeline = None
+        self._device = None

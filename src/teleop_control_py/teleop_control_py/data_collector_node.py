@@ -25,7 +25,7 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 from .camera_client import OAKClient, RealSenseClient
 from .hdf5_writer import Command, HDF5WriterThread, Sample
-from .transform_utils import _clamp, _quat_to_rotvec_xyzw, center_crop_square_and_resize_rgb
+from .transform_utils import _clamp, center_crop_square_and_resize_rgb, compose_eef_action
 
 
 class DataCollectorNode(Node):
@@ -381,19 +381,8 @@ class DataCollectorNode(Node):
             self._inc_stat("image_fail")
             return
 
-        rotvec = _quat_to_rotvec_xyzw(eef_quat)
-        action = np.array(
-            [
-                float(eef_pos[0]),
-                float(eef_pos[1]),
-                float(eef_pos[2]),
-                float(rotvec[0]),
-                float(rotvec[1]),
-                float(rotvec[2]),
-                float(gripper),
-            ],
-            dtype=np.float32,
-        )
+        # Record the realized robot-side action, so any teleop-side deadzone/limiting is already reflected here.
+        action = compose_eef_action(eef_pos, eef_quat, gripper)
 
         # 严格按照相机角色写入数据集字段，避免 agentview / wrist 对调。
         sample = Sample(
@@ -571,7 +560,8 @@ class DataCollectorNode(Node):
                 self._srv_stop_cb(Trigger.Request(), Trigger.Response())
             elif cmd == "q":
                 self.get_logger().info("Keyboard quit requested")
-                rclpy.shutdown()
+                if rclpy.ok():
+                    rclpy.shutdown()
                 break
 
     def destroy_node(self) -> bool:
@@ -619,7 +609,8 @@ def main() -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

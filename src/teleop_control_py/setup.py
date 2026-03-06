@@ -1,12 +1,12 @@
 from glob import glob
-from setuptools import setup
+from setuptools import find_packages, setup
 
 package_name = "teleop_control_py"
 
 setup(
     name=package_name,
     version="0.1.0",
-    packages=[package_name],
+    packages=find_packages(),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/teleop_control_py"]),
         ("share/" + package_name, ["package.xml"]),
@@ -28,6 +28,7 @@ setup(
             "teleop_control_node = teleop_control_py.teleop_control_node:main",
             "servo_pose_follower = teleop_control_py.servo_pose_follower:main",
             "data_collector_node = teleop_control_py.data_collector_node:main",
+            "teleop_gui = teleop_control_py.gui.app:main",
         ],
     },
 )

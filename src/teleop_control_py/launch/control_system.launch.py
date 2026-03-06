@@ -169,6 +169,8 @@ def _maybe_include_joy_driver(context, *args, **kwargs):
 			PythonLaunchDescriptionSource(joy_launch_path),
 			launch_arguments={
 				"python_executable": LaunchConfiguration("python_executable"),
+				"profile": LaunchConfiguration("joy_profile"),
+				"device_path": LaunchConfiguration("joy_device_path"),
 			}.items(),
 		)
 	)
@@ -248,6 +250,44 @@ def _maybe_include_realsense(context, *args, **kwargs):
 	return actions
 
 
+def _collector_end_effector_type(gripper_type: str) -> str:
+	return "qbsofthand" if gripper_type == "qbsofthand" else "robotic_gripper"
+
+
+def _maybe_include_data_collector(context, *args, **kwargs):
+	enable_raw = LaunchConfiguration("enable_data_collector").perform(context).strip().lower()
+	enable = enable_raw in ("1", "true", "yes", "on")
+	actions = [LogInfo(msg=f"[control_system] enable_data_collector={enable_raw}")]
+	if not enable:
+		return actions
+
+	gripper_type = _resolve_gripper_type(context)
+	collector_ee = _collector_end_effector_type(gripper_type)
+	actions.append(
+		Node(
+			package="teleop_control_py",
+			executable="data_collector_node",
+			name="data_collector",
+			output="screen",
+			parameters=[LaunchConfiguration("data_collector_params_file")],
+			arguments=[
+				"--ros-args",
+				"-p",
+				f"end_effector_type:={collector_ee}",
+			],
+		)
+	)
+	actions.append(
+		LogInfo(
+			msg=(
+				"[control_system] Included teleop_control_py/data_collector_node "
+				f"with end_effector_type={collector_ee}"
+			)
+		)
+	)
+	return actions
+
+
 def generate_launch_description() -> LaunchDescription:
 	teleop_share = get_package_share_directory("teleop_control_py")
 	default_params = os.path.join(teleop_share, "config", "teleop_params.yaml")
@@ -281,6 +321,21 @@ def generate_launch_description() -> LaunchDescription:
 		"gripper_type",
 		default_value="",
 		description="Optional gripper backend override (robotiq|qbsofthand). Empty means read from params_file.",
+	)
+	joy_profile_arg = DeclareLaunchArgument(
+		"joy_profile",
+		default_value="auto",
+		description="Joystick profile passed to multi_joy_driver (auto|xbox|ps5|generic).",
+	)
+	joy_device_path_arg = DeclareLaunchArgument(
+		"joy_device_path",
+		default_value="",
+		description="Optional joystick event device path for multi_joy_driver.",
+	)
+	mediapipe_input_topic_arg = DeclareLaunchArgument(
+		"mediapipe_input_topic",
+		default_value="",
+		description="Optional MediaPipe image topic override.",
 	)
 
 	robotiq_namespace_arg = DeclareLaunchArgument(
@@ -339,6 +394,11 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="true",
 		description="Launch MoveIt Servo (ur_moveit_config)",
 	)
+	initial_joint_controller_arg = DeclareLaunchArgument(
+		"initial_joint_controller",
+		default_value="forward_position_controller",
+		description="Initial UR joint controller for teleop-first bringup.",
+	)
 	enable_moveit_arg = DeclareLaunchArgument(
 		"enable_moveit",
 		default_value="true",
@@ -349,6 +409,16 @@ def generate_launch_description() -> LaunchDescription:
 		default_value="true",
 		description="Enable RealSense camera (effective only when input_type=mediapipe)",
 	)
+	enable_data_collector_arg = DeclareLaunchArgument(
+		"enable_data_collector",
+		default_value="false",
+		description="Enable data_collector_node bringup as part of the full control system.",
+	)
+	data_collector_params_file_arg = DeclareLaunchArgument(
+		"data_collector_params_file",
+		default_value=os.path.join(teleop_share, "config", "data_collector_params.yaml"),
+		description="Path to data collector parameter file",
+	)
 
 	ur_driver_share = get_package_share_directory("ur_robot_driver")
 	ur_launch = IncludeLaunchDescription(
@@ -357,6 +427,7 @@ def generate_launch_description() -> LaunchDescription:
 			"ur_type": LaunchConfiguration("ur_type"),
 			"robot_ip": LaunchConfiguration("robot_ip"),
 			"reverse_ip": LaunchConfiguration("reverse_ip"),
+			"initial_joint_controller": LaunchConfiguration("initial_joint_controller"),
 			"launch_rviz": LaunchConfiguration("launch_rviz"),
 		}.items(),
 	)
@@ -368,6 +439,7 @@ def generate_launch_description() -> LaunchDescription:
 			"python_executable": LaunchConfiguration("python_executable"),
 			"input_type": LaunchConfiguration("input_type"),
 			"gripper_type": LaunchConfiguration("gripper_type"),
+			"mediapipe_input_topic": LaunchConfiguration("mediapipe_input_topic"),
 			"control_mode": LaunchConfiguration("control_mode"),
 			"end_effector": LaunchConfiguration("end_effector"),
 		}.items(),
@@ -379,6 +451,9 @@ def generate_launch_description() -> LaunchDescription:
 			python_executable_arg,
 			input_type_arg,
 			gripper_type_arg,
+			joy_profile_arg,
+			joy_device_path_arg,
+			mediapipe_input_topic_arg,
 			control_mode_arg,
 			end_effector_arg,
 			robotiq_namespace_arg,
@@ -392,12 +467,16 @@ def generate_launch_description() -> LaunchDescription:
 			launch_rviz_arg,
 			launch_moveit_rviz_arg,
 			launch_servo_arg,
+			initial_joint_controller_arg,
 			enable_moveit_arg,
 			enable_camera_arg,
+			enable_data_collector_arg,
+			data_collector_params_file_arg,
 			OpaqueFunction(function=_maybe_include_joy_driver),
 			OpaqueFunction(function=_maybe_include_moveit_servo),
 			OpaqueFunction(function=_maybe_include_realsense),
 			OpaqueFunction(function=_maybe_include_end_effector_driver),
+			OpaqueFunction(function=_maybe_include_data_collector),
 			ur_launch,
 			teleop_launch,
 		]

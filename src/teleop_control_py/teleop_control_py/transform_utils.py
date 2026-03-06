@@ -225,13 +225,37 @@ def apply_velocity_limits(
     if previous is None or max_acceleration is None:
         return target_arr.astype(np.float64)
 
-    dt = max(float(dt), 1e-6)
+    # Clamp the integration window so host-side stalls do not create a huge one-shot velocity jump.
+    dt = min(max(float(dt), 1e-6), 0.1)
     prev_arr = np.asarray(previous, dtype=np.float64)
     max_acc_arr = np.asarray(max_acceleration, dtype=np.float64)
     delta = target_arr - prev_arr
     max_delta = max_acc_arr * dt
     delta = np.clip(delta, -max_delta, max_delta)
     return (prev_arr + delta).astype(np.float64)
+
+
+def compose_eef_action(
+    eef_pos: Sequence[float],
+    eef_quat_xyzw: Sequence[float],
+    gripper: float,
+) -> np.ndarray:
+    """将执行后的末端状态组装为数据集 action 向量 [xyz, rotvec, gripper]。"""
+    pos = np.asarray(eef_pos, dtype=np.float32)
+    quat = np.asarray(eef_quat_xyzw, dtype=np.float32)
+    rotvec = _quat_to_rotvec_xyzw(quat)
+    return np.array(
+        [
+            float(pos[0]),
+            float(pos[1]),
+            float(pos[2]),
+            float(rotvec[0]),
+            float(rotvec[1]),
+            float(rotvec[2]),
+            float(_clamp(gripper, 0.0, 1.0)),
+        ],
+        dtype=np.float32,
+    )
 
 
 def center_crop_square_and_resize_rgb(bgr: np.ndarray, output_size: int) -> np.ndarray:

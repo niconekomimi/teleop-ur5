@@ -110,6 +110,33 @@ def _resolve_gripper_type(params_file: str, gripper_type_override: str, end_effe
     return "robotiq"
 
 
+def _resolve_param_string(params_file: str, key: str, override: str, default: str) -> str:
+    value = str(override).strip()
+    if value:
+        return value
+
+    params = _load_teleop_params(params_file)
+    loaded = str(params.get(key, "")).strip()
+    if loaded:
+        return loaded
+
+    return default
+
+
+def _resolve_mediapipe_input_topic(params_file: str, override: str) -> str:
+    value = str(override).strip()
+    if value:
+        return value
+
+    params = _load_teleop_params(params_file)
+    for key in ("mediapipe_input_topic", "image_topic", "mediapipe_topic"):
+        loaded = str(params.get(key, "")).strip()
+        if loaded:
+            return loaded
+
+    return "/camera/camera/color/image_raw"
+
+
 def _launch_teleop_node(context, *args, **kwargs):
     params_file = LaunchConfiguration("params_file").perform(context)
     resolved_input = _resolve_input_type(
@@ -122,10 +149,15 @@ def _launch_teleop_node(context, *args, **kwargs):
         LaunchConfiguration("gripper_type").perform(context),
         LaunchConfiguration("end_effector").perform(context),
     )
+    resolved_mediapipe_input_topic = _resolve_mediapipe_input_topic(
+        params_file,
+        LaunchConfiguration("mediapipe_input_topic").perform(context),
+    )
 
     return [
         LogInfo(msg=f"[teleop_control.launch] resolved input_type: {resolved_input}"),
         LogInfo(msg=f"[teleop_control.launch] resolved gripper_type: {resolved_gripper}"),
+        LogInfo(msg=f"[teleop_control.launch] resolved mediapipe_input_topic: {resolved_mediapipe_input_topic}"),
         ExecuteProcess(
             name="teleop_control_node",
             cmd=[
@@ -141,6 +173,8 @@ def _launch_teleop_node(context, *args, **kwargs):
                 f"input_type:={resolved_input}",
                 "-p",
                 f"gripper_type:={resolved_gripper}",
+                "-p",
+                f"mediapipe_input_topic:={resolved_mediapipe_input_topic}",
             ],
             output="screen",
         ),
@@ -188,6 +222,12 @@ def generate_launch_description():
         description="Deprecated alias for gripper_type (auto->qbsofthand).",
     )
 
+    mediapipe_input_topic_arg = DeclareLaunchArgument(
+        "mediapipe_input_topic",
+        default_value="",
+        description="Optional MediaPipe image topic override.",
+    )
+
     return LaunchDescription(
         [
             params_file_arg,
@@ -196,6 +236,7 @@ def generate_launch_description():
             gripper_type_arg,
             control_mode_arg,
             end_effector_arg,
+            mediapipe_input_topic_arg,
             OpaqueFunction(function=_launch_teleop_node),
         ]
     )
