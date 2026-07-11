@@ -1,5 +1,4 @@
 import re
-import threading
 import time
 
 import numpy as np
@@ -15,7 +14,7 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 from std_srvs.srv import Trigger
 
-from ..core import ActionCommand, ControlCoordinator, ControlSource
+from ..core import ActionCommand, ControlCoordinator, ControlSource, LatestActionBuffer
 from ..device_manager import (
     ControllerGripperBackend,
     DEFAULT_ROBOT_PROFILE_NAME,
@@ -60,10 +59,11 @@ class ROS2Worker(QThread):
         self._home_zone_rotation_max_deg = []
         self._inference_gripper_type = "robotiq"
         self._inference_control_hz = 50.0
+        self._inference_action_timeout_sec = 0.25
         self._inference_control_enabled = False
         self._inference_estopped = False
-        self._inference_action_lock = threading.Lock()
-        self._latest_inference_action = None
+        self._inference_action_buffer = LatestActionBuffer(size=7)
+        self._inference_action_timeout_reported = False
         self._inference_control_timer = None
         self._arm_ctrl = None
         self._gripper_ctrl = None
@@ -135,12 +135,18 @@ class ROS2Worker(QThread):
             self._apply_inference_control_parameters()
             self._sync_commander_home_config(log_failures=True)
 
-    def set_inference_control_config(self, gripper_type: str, control_hz: float = 50.0) -> None:
+    def set_inference_control_config(
+        self,
+        gripper_type: str,
+        control_hz: float = 50.0,
+        action_timeout_sec: float = 0.25,
+    ) -> None:
         normalized = str(gripper_type).strip().lower()
         if normalized not in {"robotiq", "qbsofthand"}:
             normalized = "robotiq"
         self._inference_gripper_type = normalized
         self._inference_control_hz = max(1.0, float(control_hz))
+        self._inference_action_timeout_sec = max(0.05, float(action_timeout_sec))
 
         if self.node is not None:
             self._apply_inference_control_parameters()
@@ -168,6 +174,8 @@ class ROS2Worker(QThread):
 
         if self._control_coordinator is not None:
             self._control_coordinator.notify_inference_execution(False)
+        self._inference_action_buffer.clear()
+        self._inference_action_timeout_reported = False
         self._publish_zero_twist()
         self.log_signal.emit("推理执行已停止。")
 
@@ -176,15 +184,17 @@ class ROS2Worker(QThread):
         self._inference_control_enabled = False
         if self._control_coordinator is not None:
             self._control_coordinator.notify_estop(True)
+        self._inference_action_buffer.clear()
+        self._inference_action_timeout_reported = False
         self._publish_zero_twist()
         self.log_signal.emit("已触发推理急停。")
 
     def update_inference_action_command(self, action) -> None:
-        action_array = np.asarray(action, dtype=np.float32).reshape(-1)
-        if action_array.size < 7:
+        accepted, reason = self._inference_action_buffer.update(action)
+        if not accepted:
+            self.log_signal.emit(f"Inference action rejected: {reason}")
             return
-        with self._inference_action_lock:
-            self._latest_inference_action = action_array[:7].copy()
+        self._inference_action_timeout_reported = False
 
     def set_home_config(
         self,
@@ -345,6 +355,7 @@ class ROS2Worker(QThread):
         self._set_or_declare_parameter("teleop_controller", self._teleop_controller)
         self._set_or_declare_parameter("trajectory_controller", self._trajectory_controller)
         self._set_or_declare_parameter("startup_retry_period_sec", 1.0)
+        self._set_or_declare_parameter("inference_action_timeout_sec", self._inference_action_timeout_sec)
         self._set_or_declare_parameter("gripper_cmd_topic", self.gripper_topic or grippers.command_topic)
         self._set_or_declare_parameter("gripper_command_delta", grippers.command_delta)
         self._set_or_declare_parameter("gripper_quantization_levels", grippers.quantization_levels)
@@ -426,11 +437,16 @@ class ROS2Worker(QThread):
         if self._control_coordinator.snapshot().active_source != ControlSource.INFERENCE:
             return
 
-        with self._inference_action_lock:
-            action = None if self._latest_inference_action is None else self._latest_inference_action.copy()
-
-        if action is None or action.size < 7:
+        buffered = self._inference_action_buffer.read(max_age_sec=self._inference_action_timeout_sec)
+        action = buffered.action
+        if action is None:
+            self._arm_ctrl.send_zero_twist()
+            if buffered.reason == "action_stale" and not self._inference_action_timeout_reported:
+                age_ms = 1000.0 * float(buffered.age_sec or 0.0)
+                self.log_signal.emit(f"Inference action timed out after {age_ms:.0f} ms; arm output held at zero.")
+                self._inference_action_timeout_reported = True
             return
+        self._inference_action_timeout_reported = False
 
         command = ActionCommand.from_array7(action, source=ControlSource.INFERENCE)
         command = command.with_gripper(self._binary_gripper_command(command.gripper))

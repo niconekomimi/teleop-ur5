@@ -1,6 +1,6 @@
 # 架构
 
-更新时间：2026-05-06
+更新时间：2026-07-11
 
 `teleop_control` 是一个面向真实机器人运行的 ROS 2 工作区。系统不是单一大节点，而是由 GUI、ROS launch、若干专职 ROS 节点、共享 `core` 模块、硬件后端、外部 ROS 包和模型仓库共同组成。
 
@@ -142,7 +142,7 @@ flowchart TD
 
 | 层 | 主要文件 | 职责 |
 | --- | --- | --- |
-| GUI | `gui/main_window.py`, `gui/app_service.py`, `gui/runtime/process_manager.py` | 用户界面、进程编排、配置选择、状态展示 |
+| GUI | `gui/main_window.py`, `gui/theme.py`, `gui/panels/`, `gui/controllers/`, `gui/dialogs/`, `gui/app_service.py`, `gui/runtime/process_manager.py` | 可替换的 Qt 表现层、功能面板、控件协调、设置对话框、进程编排适配、配置选择、状态展示 |
 | GUI ROS 桥 | `gui/ros_worker.py` | 订阅机器人状态，调用录制和 commander 服务，承接推理执行动作下发 |
 | Core | `core/orchestrator.py`, `core/mux.py`, `core/control_coordinator.py`, `core/sync_hub.py`, `core/recorder.py`, `core/inference_service.py` | 状态机、动作仲裁、同步采样、录制生命周期、推理 worker 生命周期 |
 | ROS 节点 | `nodes/teleop_control_node.py`, `nodes/robot_commander_node.py`, `nodes/data_collector_node.py`, `nodes/joy_driver_node.py`, `nodes/quest3_webxr_bridge_node.py` | 运行时闭环、服务接口、采集、输入桥接 |
@@ -177,6 +177,8 @@ GUI 通过 `GuiAppService` 和 `ProcessManager` 管理长期运行进程：
 - `start_teleop()` 启动 `control_system.launch.py`，并启用所选输入后端
 - `start_data_collector()` 单独启动 `data_collector_node`
 - `ROS2Worker` 在需要预览状态、录制服务、Home 服务或推理执行时运行
+
+GUI 的替换边界位于 `main_window.py` 的控件别名和信号接线：`WorkspaceShell`、`theme.py` 与四个 panel 只负责控件、布局和视觉状态，控制协调、录制、推理、ROS 通信与硬件后端继续由下一层承担。离屏预览脚本 `scripts/render_gui_preview.py` 复用同一套 shell、theme 和 panel，但只注入假状态，不导入 ROS 或访问设备。
 
 ## 运行边界
 

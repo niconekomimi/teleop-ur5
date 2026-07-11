@@ -5,17 +5,19 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
-from geometry_msgs.msg import Twist
+
+if TYPE_CHECKING:
+    from geometry_msgs.msg import Twist
 
 
 def _as_readonly_vector(values, size: int, *, dtype=np.float64) -> np.ndarray:
     array = np.asarray(values, dtype=dtype).reshape(-1)
     if array.size != size:
         raise ValueError(f"Expected vector of size {size}, got {array.size}")
-    result = np.ascontiguousarray(array)
+    result = np.array(array, dtype=dtype, copy=True, order="C")
     result.setflags(write=False)
     return result
 
@@ -49,7 +51,7 @@ class ActionCommand:
     @classmethod
     def from_twist(
         cls,
-        twist: Twist,
+        twist: "Twist",
         gripper: float = 0.0,
         source: ControlSource = ControlSource.NONE,
     ) -> 'ActionCommand':
@@ -67,7 +69,9 @@ class ActionCommand:
             raise ValueError(f'Expected action array with at least 7 values, got {array.size}')
         return cls(array[:3], array[3:6], gripper=float(array[6]), source=source)
 
-    def to_twist(self) -> Twist:
+    def to_twist(self) -> "Twist":
+        from geometry_msgs.msg import Twist
+
         twist = Twist()
         twist.linear.x = float(self.linear_xyz[0])
         twist.linear.y = float(self.linear_xyz[1])

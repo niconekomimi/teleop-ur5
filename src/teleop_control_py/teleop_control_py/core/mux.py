@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
 from .models import ActionCommand, ControlSource
-from ..device_manager.backends.interfaces import ArmBackend, GripperBackend
+
+if TYPE_CHECKING:
+    from ..device_manager.backends.interfaces import ArmBackend, GripperBackend
 
 
 DEFAULT_PRIORITY: dict[ControlSource, int] = {

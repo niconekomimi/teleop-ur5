@@ -6,6 +6,7 @@ from importlib import import_module
 from typing import Any
 
 __all__ = [
+    'ActionBufferRead',
     'ActionCommand',
     'ActionMux',
     'CameraFrameSet',
@@ -17,6 +18,7 @@ __all__ = [
     'InferenceLaunchConfig',
     'InferenceService',
     'InferenceWorkerCallbacks',
+    'LatestActionBuffer',
     'MuxDispatchResult',
     'ObservationSnapshot',
     'OrchestratorState',
@@ -38,6 +40,9 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    if name in {'ActionBufferRead', 'LatestActionBuffer'}:
+        module = import_module('.action_buffer', __name__)
+        return getattr(module, name)
     if name in {'CameraRuntimeContext', 'HardwareConflictError', 'ResourceManager'}:
         module = import_module('.resource_manager', __name__)
         return getattr(module, name)

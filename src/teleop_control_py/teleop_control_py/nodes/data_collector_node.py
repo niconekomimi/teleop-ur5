@@ -963,7 +963,8 @@ class DataCollectorNode(Node):
                 self.get_logger().warn(f"关闭相机失败: {exc!r}")
 
         try:
-            self._recorder.close()
+            if not self._recorder.close():
+                self.get_logger().error("HDF5 writer did not drain cleanly before shutdown.")
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(f"关闭 HDF5 写线程失败: {exc!r}")
 

@@ -41,6 +41,7 @@ class RosWorkerConfig:
     home_zone_rotation_max_deg: Sequence[float]
     inference_gripper_type: str
     inference_control_hz: float = 50.0
+    inference_action_timeout_sec: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,7 @@ class GuiAppService:
         worker.set_inference_control_config(
             gripper_type=config.inference_gripper_type,
             control_hz=float(config.inference_control_hz),
+            action_timeout_sec=float(config.inference_action_timeout_sec),
         )
         return worker
 

@@ -89,6 +89,27 @@ source install/setup.bash
 colcon build --packages-select teleop_control_py
 ```
 
+### 无硬件离线测试
+
+核心状态机、动作仲裁、同步采样、推理动作超时和 HDF5 写盘可以在没有机器人、ROS 图和相机的环境中测试：
+
+```bash
+pip install -r requirements-test.txt
+python -m pytest
+```
+
+默认测试入口只收集 `tests/`。`test/` 中需要 ROS 或真实设备的诊断脚本不会被自动执行。
+
+不启动 ROS 和硬件也可以离屏渲染完整工作区，用于检查布局和三种运行状态：
+
+```bash
+python scripts/render_gui_preview.py --scenario idle
+python scripts/render_gui_preview.py --scenario running --sizes 1440x900 1280x800
+python scripts/render_gui_preview.py --scenario error --sizes 1280x800
+```
+
+生成的 PNG 位于 `artifacts/gui/`。
+
 ### 启动 GUI
 
 推荐入口：

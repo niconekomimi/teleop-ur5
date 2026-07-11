@@ -37,6 +37,7 @@ teleop_gui:
     default_inference_embedding_path: /home/rvl/collect_datasets_ws/Real_IL/task_embeddings/data_fruits.pkl
     default_inference_device: cuda
     default_inference_hz: 20.0
+    default_inference_action_timeout_sec: 0.25
     collect_inference_action_logs: false
     camera_driver_options:
     - realsense

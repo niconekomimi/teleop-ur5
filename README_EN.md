@@ -89,6 +89,31 @@ When changing only the main package, building just `teleop_control_py` is also u
 colcon build --packages-select teleop_control_py
 ```
 
+### Hardware-independent tests
+
+The core state machine, action arbitration, synchronized capture, inference
+action timeout, and HDF5 writer can be tested without a robot, ROS graph, or
+camera:
+
+```bash
+pip install -r requirements-test.txt
+python -m pytest
+```
+
+Default discovery is limited to `tests/`. Hardware and ROS probes under
+`test/` are not executed automatically.
+
+The full workspace can also be rendered offscreen without ROS or hardware to
+check the layout and its three runtime states:
+
+```bash
+python scripts/render_gui_preview.py --scenario idle
+python scripts/render_gui_preview.py --scenario running --sizes 1440x900 1280x800
+python scripts/render_gui_preview.py --scenario error --sizes 1280x800
+```
+
+Generated PNG files are written to `artifacts/gui/`.
+
 ### Launch The GUI
 
 Recommended entry:

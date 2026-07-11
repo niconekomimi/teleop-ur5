@@ -3,7 +3,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,10 +22,53 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QMenu,
     QProgressDialog,
+    QStyle,
     QWidget,
 )
 
 from teleop_control_py.data.dataset_rebuilder import rebuild_file, quat_to_rotvec_xyzw, sorted_demo_names
+
+from ..theme import set_standard_icon, set_widget_role
+from .image_viewport import ImageViewport
+
+
+class _ElidedPathLabel(QLabel):
+    """Bound a path label while keeping the complete path discoverable."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._display_text = "未选择文件"
+        self.setMinimumWidth(120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        set_widget_role(self, "hint")
+        self._refresh_text()
+
+    def set_path(self, path):
+        normalized = os.fspath(path) if path else ""
+        self._display_text = os.path.basename(normalized) or "未选择文件"
+        self.setToolTip(os.path.abspath(normalized) if normalized else "")
+        self._refresh_text()
+
+    def sizeHint(self):  # noqa: N802
+        hint = super().sizeHint()
+        return QSize(min(300, hint.width()), hint.height())
+
+    def minimumSizeHint(self):  # noqa: N802
+        hint = super().minimumSizeHint()
+        return QSize(120, hint.height())
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        self._refresh_text()
+
+    def _refresh_text(self):
+        available_width = max(80, self.width() - 4)
+        elided = self.fontMetrics().elidedText(
+            self._display_text,
+            Qt.ElideMiddle,
+            available_width,
+        )
+        super().setText(elided)
 
 
 class HDF5ViewerDialog(QDialog):
@@ -35,9 +78,9 @@ class HDF5ViewerDialog(QDialog):
     def __init__(self, initial_hdf5_path, parent=None):
         super().__init__(parent)
         self.setWindowTitle("HDF5 数据集高级回放器")
-        self.resize(1150, 750)
+        self.resize(1080, 720)
 
-        self.hdf5_path = initial_hdf5_path
+        self.hdf5_path = os.fspath(initial_hdf5_path) if initial_hdf5_path else ""
         self.file_handle = None
         self.current_demo_group = None
         self.current_demo_name = None
@@ -53,74 +96,96 @@ class HDF5ViewerDialog(QDialog):
         self._wrist_source_pixmap = QPixmap()
 
         self.setup_ui()
-        if os.path.exists(self.hdf5_path):
+        if self.hdf5_path and os.path.exists(self.hdf5_path):
             self.open_hdf5_file(self.hdf5_path)
+        elif self.hdf5_path:
+            self._reset_loaded_content("指定的 HDF5 文件不存在，请重新选择。")
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(14, 14, 14, 14)
+        main_layout.setSpacing(8)
 
-        top_layout = QHBoxLayout()
-        self.btn_open_file = QPushButton("📂 选择 HDF5 文件")
-        self.btn_open_file.setStyleSheet("font-weight: bold; background-color: #d0e8f1;")
+        file_layout = QHBoxLayout()
+        file_layout.setSpacing(8)
+        self.btn_open_file = QPushButton("打开文件")
+        set_widget_role(self.btn_open_file, "secondary")
+        set_standard_icon(self.btn_open_file, QStyle.SP_DialogOpenButton)
         self.btn_open_file.clicked.connect(self.open_file_dialog)
-        top_layout.addWidget(self.btn_open_file)
+        file_layout.addWidget(self.btn_open_file)
 
-        self.lbl_file_path = QLabel(os.path.basename(self.hdf5_path) if self.hdf5_path else "未选择文件")
-        self.lbl_file_path.setStyleSheet("color: #555; font-style: italic;")
-        top_layout.addWidget(self.lbl_file_path)
-
-        top_layout.addWidget(QLabel("  |  选择录制序列:"))
-        self.demo_combo = QComboBox()
-        self.demo_combo.currentIndexChanged.connect(self.load_demo)
-        top_layout.addWidget(self.demo_combo)
-
-        self.btn_prev_demo = QPushButton("上一条 demo")
-        self.btn_prev_demo.clicked.connect(self.goto_prev_demo)
-        top_layout.addWidget(self.btn_prev_demo)
-
-        self.btn_next_demo = QPushButton("下一条 demo")
-        self.btn_next_demo.clicked.connect(self.goto_next_demo)
-        top_layout.addWidget(self.btn_next_demo)
-
-        self.btn_delete_current = QPushButton("删除当前 demo")
-        self.btn_delete_current.clicked.connect(self.delete_current_demo)
-        top_layout.addWidget(self.btn_delete_current)
-
-        self.btn_save_changes = QPushButton("保存修改")
-        self.btn_save_changes.setStyleSheet("font-weight: bold; background-color: #ffe8a1;")
-        self.btn_save_changes.clicked.connect(self.save_pending_changes)
-        top_layout.addWidget(self.btn_save_changes)
+        self.lbl_file_path = _ElidedPathLabel()
+        self.lbl_file_path.set_path(self.hdf5_path)
+        file_layout.addWidget(self.lbl_file_path, 1)
 
         self.btn_rebuild_schema = QPushButton("转换为训练格式")
-        self.btn_rebuild_schema.setStyleSheet("font-weight: bold; background-color: #d7f4d1;")
+        set_widget_role(self.btn_rebuild_schema, "secondary")
+        set_standard_icon(self.btn_rebuild_schema, QStyle.SP_BrowserReload)
         self.btn_rebuild_schema.clicked.connect(self.rebuild_dataset_schema)
-        top_layout.addWidget(self.btn_rebuild_schema)
+        file_layout.addWidget(self.btn_rebuild_schema)
+        main_layout.addLayout(file_layout)
+
+        demo_layout = QHBoxLayout()
+        demo_layout.setSpacing(8)
+        demo_layout.addWidget(QLabel("录制序列"))
+        self.demo_combo = QComboBox()
+        self.demo_combo.setMinimumWidth(150)
+        self.demo_combo.setMaximumWidth(280)
+        self.demo_combo.currentIndexChanged.connect(self.load_demo)
+        demo_layout.addWidget(self.demo_combo, 1)
+
+        self.btn_prev_demo = QPushButton("上一条")
+        set_widget_role(self.btn_prev_demo, "secondary")
+        set_standard_icon(self.btn_prev_demo, QStyle.SP_ArrowBack)
+        self.btn_prev_demo.clicked.connect(self.goto_prev_demo)
+        demo_layout.addWidget(self.btn_prev_demo)
+
+        self.btn_next_demo = QPushButton("下一条")
+        set_widget_role(self.btn_next_demo, "secondary")
+        set_standard_icon(self.btn_next_demo, QStyle.SP_ArrowForward)
+        self.btn_next_demo.clicked.connect(self.goto_next_demo)
+        demo_layout.addWidget(self.btn_next_demo)
+
+        self.btn_delete_current = QPushButton("删除 demo")
+        set_widget_role(self.btn_delete_current, "danger-secondary")
+        set_standard_icon(self.btn_delete_current, QStyle.SP_TrashIcon)
+        self.btn_delete_current.clicked.connect(self.delete_current_demo)
+        demo_layout.addWidget(self.btn_delete_current)
+
+        self.btn_save_changes = QPushButton("保存修改")
+        set_widget_role(self.btn_save_changes, "primary")
+        set_standard_icon(self.btn_save_changes, QStyle.SP_DialogSaveButton)
+        self.btn_save_changes.clicked.connect(self.save_pending_changes)
+        demo_layout.addWidget(self.btn_save_changes)
 
         self.lbl_pending_state = QLabel("无待保存修改")
-        self.lbl_pending_state.setStyleSheet("color: #555;")
-        top_layout.addWidget(self.lbl_pending_state)
-
-        self.lbl_frame_info = QLabel("当前帧: 0 / 0")
-        self.lbl_frame_info.setStyleSheet("font-weight: bold; color: blue;")
-        top_layout.addWidget(self.lbl_frame_info)
-        top_layout.addStretch()
-        main_layout.addLayout(top_layout)
+        set_widget_role(self.lbl_pending_state, "status-neutral")
+        demo_layout.addWidget(self.lbl_pending_state)
+        demo_layout.addStretch(1)
+        main_layout.addLayout(demo_layout)
 
         ctrl_layout = QHBoxLayout()
-        self.btn_prev = QPushButton("⏮ 上一帧")
+        ctrl_layout.setSpacing(8)
+        self.btn_prev = QPushButton("上一帧")
+        set_widget_role(self.btn_prev, "secondary")
+        set_standard_icon(self.btn_prev, QStyle.SP_MediaSkipBackward)
         self.btn_prev.clicked.connect(self.step_prev)
         ctrl_layout.addWidget(self.btn_prev)
 
-        self.btn_play = QPushButton("▶ 播放")
-        self.btn_play.setStyleSheet("font-weight: bold; color: green; min-width: 80px;")
+        self.btn_play = QPushButton("播放")
+        self.btn_play.setMinimumWidth(82)
+        set_widget_role(self.btn_play, "primary")
+        set_standard_icon(self.btn_play, QStyle.SP_MediaPlay)
         self.btn_play.clicked.connect(self.toggle_play)
         ctrl_layout.addWidget(self.btn_play)
 
-        self.btn_next = QPushButton("⏭ 下一帧")
+        self.btn_next = QPushButton("下一帧")
+        set_widget_role(self.btn_next, "secondary")
+        set_standard_icon(self.btn_next, QStyle.SP_MediaSkipForward)
         self.btn_next.clicked.connect(self.step_next)
         ctrl_layout.addWidget(self.btn_next)
 
-        ctrl_layout.addWidget(QLabel("  倍速:"))
+        ctrl_layout.addWidget(QLabel("倍速"))
         self.speed_combo = QComboBox()
         self.speed_combo.addItems(["0.5x (5 Hz)", "1.0x (10 Hz)", "2.0x (20 Hz)", "4.0x (40 Hz)", "8.0x (80 Hz)"])
         self.speed_combo.setCurrentText("1.0x (10 Hz)")
@@ -132,10 +197,17 @@ class HDF5ViewerDialog(QDialog):
         self.slider.valueChanged.connect(self.on_slider_changed)
         self.slider.sliderPressed.connect(self.pause_playback)
         ctrl_layout.addWidget(self.slider)
+
+        self.lbl_frame_info = QLabel("当前帧: 0 / 0")
+        set_widget_role(self.lbl_frame_info, "value")
+        self.lbl_frame_info.setMinimumWidth(150)
+        self.lbl_frame_info.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        ctrl_layout.addWidget(self.lbl_frame_info)
         main_layout.addLayout(ctrl_layout)
 
         edit_layout = QHBoxLayout()
-        edit_layout.addWidget(QLabel("裁剪范围(保存后生效):"))
+        edit_layout.setSpacing(8)
+        edit_layout.addWidget(QLabel("裁剪范围（保存后生效）"))
         self.crop_start_spin = QSpinBox()
         self.crop_start_spin.setMinimum(1)
         self.crop_start_spin.setMaximum(1)
@@ -148,19 +220,25 @@ class HDF5ViewerDialog(QDialog):
         edit_layout.addWidget(self.crop_end_spin)
 
         self.btn_apply_crop = QPushButton("设置裁剪")
+        set_widget_role(self.btn_apply_crop, "secondary")
+        set_standard_icon(self.btn_apply_crop, QStyle.SP_DialogApplyButton)
         self.btn_apply_crop.clicked.connect(self.apply_crop_range)
         edit_layout.addWidget(self.btn_apply_crop)
 
         self.btn_clear_crop = QPushButton("清除裁剪")
+        set_widget_role(self.btn_clear_crop, "secondary")
+        set_standard_icon(self.btn_clear_crop, QStyle.SP_DialogResetButton)
         self.btn_clear_crop.clicked.connect(self.clear_crop_range)
         edit_layout.addWidget(self.btn_clear_crop)
 
         self.btn_auto_trim_zero_actions = QPushButton("自动裁切零动作首尾")
+        set_widget_role(self.btn_auto_trim_zero_actions, "warning")
+        set_standard_icon(self.btn_auto_trim_zero_actions, QStyle.SP_BrowserReload)
         self.btn_auto_trim_zero_actions.clicked.connect(self.auto_trim_zero_action_ranges)
         edit_layout.addWidget(self.btn_auto_trim_zero_actions)
 
         self.lbl_crop_state = QLabel("当前 demo 无待保存裁剪")
-        self.lbl_crop_state.setStyleSheet("color: #555;")
+        set_widget_role(self.lbl_crop_state, "status-neutral")
         edit_layout.addWidget(self.lbl_crop_state)
         edit_layout.addStretch()
         main_layout.addLayout(edit_layout)
@@ -169,7 +247,7 @@ class HDF5ViewerDialog(QDialog):
         content_layout.setSpacing(12)
 
         self.cam_panel = QWidget()
-        self.cam_panel.setMinimumWidth(620)
+        self.cam_panel.setMinimumWidth(440)
         self.cam_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         cam_layout = QHBoxLayout(self.cam_panel)
         cam_layout.setContentsMargins(0, 0, 0, 0)
@@ -180,13 +258,14 @@ class HDF5ViewerDialog(QDialog):
         agent_layout.setContentsMargins(0, 0, 0, 0)
         agent_layout.setSpacing(6)
 
-        global_title = QLabel("【全局相机 (Agent View)】")
+        global_title = QLabel("全局相机 (Agent View)")
         global_title.setAlignment(Qt.AlignCenter)
-        self.lbl_agent = QLabel("无画面")
-        self.lbl_agent.setAlignment(Qt.AlignCenter)
-        self.lbl_agent.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
-        self.lbl_agent.setMinimumHeight(220)
-        self.lbl_agent.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        set_widget_role(global_title, "subsection-title")
+        self.lbl_agent = ImageViewport(
+            "未加载图像",
+            preferred_size=QSize(360, 270),
+            minimum_size=QSize(180, 140),
+        )
         self.lbl_agent.setToolTip("右键可保存当前帧图像")
         self.lbl_agent.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_agent.customContextMenuRequested.connect(
@@ -200,13 +279,14 @@ class HDF5ViewerDialog(QDialog):
         wrist_layout.setContentsMargins(0, 0, 0, 0)
         wrist_layout.setSpacing(6)
 
-        wrist_title = QLabel("【手部相机 (Eye-in-Hand)】")
+        wrist_title = QLabel("手部相机 (Eye-in-Hand)")
         wrist_title.setAlignment(Qt.AlignCenter)
-        self.lbl_wrist = QLabel("无画面")
-        self.lbl_wrist.setAlignment(Qt.AlignCenter)
-        self.lbl_wrist.setStyleSheet("background-color: #202020; color: white; border-radius: 4px;")
-        self.lbl_wrist.setMinimumHeight(220)
-        self.lbl_wrist.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        set_widget_role(wrist_title, "subsection-title")
+        self.lbl_wrist = ImageViewport(
+            "未加载图像",
+            preferred_size=QSize(360, 270),
+            minimum_size=QSize(180, 140),
+        )
         self.lbl_wrist.setToolTip("右键可保存当前帧图像")
         self.lbl_wrist.setContextMenuPolicy(Qt.CustomContextMenu)
         self.lbl_wrist.customContextMenuRequested.connect(
@@ -221,12 +301,93 @@ class HDF5ViewerDialog(QDialog):
 
         self.text_state = QTextEdit()
         self.text_state.setReadOnly(True)
-        self.text_state.setMinimumWidth(280)
-        self.text_state.setMaximumWidth(420)
+        self.text_state.setMinimumWidth(240)
+        self.text_state.setMaximumWidth(360)
         self.text_state.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.text_state.setStyleSheet("font-family: Consolas, monospace; font-size: 13px; background-color: #f5f5f5;")
+        set_widget_role(self.text_state, "action_output")
         content_layout.addWidget(self.text_state, 1)
         main_layout.addLayout(content_layout)
+
+        self._reset_loaded_content("请选择 HDF5 文件开始预览。")
+
+    def _set_status_label(self, label, text, role="status-neutral"):
+        label.setText(str(text))
+        set_widget_role(label, role)
+
+    def _close_file_handle(self):
+        handle = self.file_handle
+        self.file_handle = None
+        self.current_demo_group = None
+        self.current_demo_name = None
+        if handle is not None:
+            try:
+                handle.close()
+            except Exception:
+                pass
+
+    def _reset_loaded_content(self, message):
+        self.pause_playback()
+        self.demo_combo.blockSignals(True)
+        self.demo_combo.clear()
+        self.demo_combo.blockSignals(False)
+        self.demo_names = []
+        self.pending_crop_ranges = {}
+        self.pending_deleted_demos = set()
+        self.current_demo_group = None
+        self.current_demo_name = None
+
+        self.slider.blockSignals(True)
+        self.slider.setRange(0, 0)
+        self.slider.setValue(0)
+        self.slider.blockSignals(False)
+        for spin_box in (self.crop_start_spin, self.crop_end_spin):
+            spin_box.blockSignals(True)
+            spin_box.setRange(1, 1)
+            spin_box.setValue(1)
+            spin_box.blockSignals(False)
+
+        self.lbl_frame_info.setText("当前帧: 0 / 0")
+        self._set_status_label(self.lbl_pending_state, "无待保存修改")
+        self._set_status_label(self.lbl_crop_state, "未选择 demo")
+        self._clear_camera_views()
+        self.text_state.setPlainText(str(message))
+        self._sync_command_state()
+
+    def _has_current_frames(self):
+        if self.file_handle is None or self.current_demo_group is None or self.current_demo_name is None:
+            return False
+        try:
+            start, end = self._effective_crop_range(self.current_demo_name)
+        except Exception:
+            return False
+        return end > start
+
+    def _sync_command_state(self):
+        has_file = self.file_handle is not None
+        has_demo = (
+            has_file
+            and self.current_demo_group is not None
+            and self.current_demo_name in self.demo_names
+        )
+        has_frames = has_demo and self._has_current_frames()
+        has_pending = bool(self.pending_crop_ranges or self.pending_deleted_demos)
+
+        self.demo_combo.setEnabled(has_file and bool(self.demo_names))
+        self.btn_delete_current.setEnabled(has_demo and len(self.demo_names) > 1)
+        self.btn_save_changes.setEnabled(has_file and has_pending)
+        self.btn_play.setEnabled(has_frames)
+        self.speed_combo.setEnabled(has_frames)
+        self.slider.setEnabled(has_frames)
+        self.btn_prev.setEnabled(has_frames and self.slider.value() > 0)
+        self.btn_next.setEnabled(has_frames and self.slider.value() < self.slider.maximum())
+        self.crop_start_spin.setEnabled(has_frames)
+        self.crop_end_spin.setEnabled(has_frames)
+        self.btn_apply_crop.setEnabled(has_frames)
+        self.btn_clear_crop.setEnabled(
+            has_demo and self.current_demo_name in self.pending_crop_ranges
+        )
+        self.btn_auto_trim_zero_actions.setEnabled(has_file and bool(self.demo_names))
+        self._update_demo_navigation_buttons()
 
     def open_file_dialog(self):
         start_dir = os.path.dirname(self.hdf5_path) if self.hdf5_path else os.getcwd()
@@ -240,34 +401,39 @@ class HDF5ViewerDialog(QDialog):
             self.open_hdf5_file(file_path)
 
     def open_hdf5_file(self, path):
-        self.pause_playback()
-        if self.file_handle is not None:
-            self.file_handle.close()
-            self.file_handle = None
+        normalized_path = os.fspath(path)
+        self._close_file_handle()
+        self.hdf5_path = normalized_path
+        self.lbl_file_path.set_path(normalized_path)
+        self.setWindowTitle(f"HDF5 数据集高级回放器 - {os.path.basename(normalized_path)}")
+        self._reset_loaded_content("正在加载数据集...")
 
-        self.hdf5_path = path
-        self.lbl_file_path.setText(os.path.basename(path))
-        self.setWindowTitle(f"HDF5 数据集高级回放器 - {os.path.basename(path)}")
-        self.demo_combo.clear()
-        self.demo_names = []
-        self.pending_crop_ranges = {}
-        self.pending_deleted_demos = set()
-        self.current_demo_group = None
-        self.current_demo_name = None
-
+        opened_handle = None
         try:
-            self.file_handle = h5py.File(path, "r")
-            if "data" not in self.file_handle:
+            opened_handle = h5py.File(normalized_path, "r")
+            if "data" not in opened_handle or not isinstance(opened_handle["data"], h5py.Group):
                 raise KeyError("HDF5 文件中未找到 'data' 根组，格式不符合要求。")
 
-            demos = list(self.file_handle["data"].keys())
+            demos = list(opened_handle["data"].keys())
             if not demos:
                 raise ValueError("数据集中没有任何 demo 序列。")
 
+            self.file_handle = opened_handle
             self.demo_names = sorted(demos, key=self._demo_sort_key)
             self._refresh_demo_combo()
         except Exception as exc:
+            if opened_handle is not None:
+                try:
+                    opened_handle.close()
+                except Exception:
+                    pass
+            self.file_handle = None
+            self._reset_loaded_content(f"无法打开数据集。\n{exc}")
             QMessageBox.critical(self, "HDF5 读取错误", str(exc))
+            return False
+
+        self._sync_command_state()
+        return True
 
     def rebuild_dataset_schema(self):
         class RebuildCancelledError(Exception):
@@ -517,7 +683,7 @@ class HDF5ViewerDialog(QDialog):
 
     def _update_demo_navigation_buttons(self):
         current_index = self.demo_combo.currentIndex()
-        has_demos = bool(self.demo_names)
+        has_demos = self.file_handle is not None and bool(self.demo_names)
         self.btn_prev_demo.setEnabled(has_demos and current_index > 0)
         self.btn_next_demo.setEnabled(has_demos and 0 <= current_index < len(self.demo_names) - 1)
 
@@ -528,14 +694,15 @@ class HDF5ViewerDialog(QDialog):
         if self.pending_deleted_demos:
             changes.append(f"删除 {len(self.pending_deleted_demos)} 个")
         if not changes:
-            self.lbl_pending_state.setText("无待保存修改")
-            self.lbl_pending_state.setStyleSheet("color: #555;")
+            self._set_status_label(self.lbl_pending_state, "无待保存修改")
         else:
-            self.lbl_pending_state.setText("待保存修改: " + "，".join(changes))
-            self.lbl_pending_state.setStyleSheet("color: #b26a00; font-weight: bold;")
+            self._set_status_label(
+                self.lbl_pending_state,
+                "待保存修改: " + "，".join(changes),
+                "status-warning",
+            )
 
-        self.btn_delete_current.setEnabled(len(self.demo_names) > 1)
-        self._update_demo_navigation_buttons()
+        self._sync_command_state()
 
     def _copy_attrs(self, source, target):
         for key, value in source.attrs.items():
@@ -943,16 +1110,7 @@ class HDF5ViewerDialog(QDialog):
         QMessageBox.information(self, "保存成功", f"图像已保存到:\n{save_path}")
 
     def _set_camera_pixmap(self, label, pixmap):
-        if pixmap.isNull():
-            label.setPixmap(QPixmap())
-            return
-
-        target_size = label.size()
-        if target_size.width() <= 1 or target_size.height() <= 1:
-            label.setPixmap(pixmap)
-            return
-
-        label.setPixmap(pixmap.scaled(target_size, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        label.set_frame_pixmap(pixmap)
 
     def _refresh_camera_pixmaps(self):
         if not self._agent_source_pixmap.isNull():
@@ -960,23 +1118,38 @@ class HDF5ViewerDialog(QDialog):
         if not self._wrist_source_pixmap.isNull():
             self._set_camera_pixmap(self.lbl_wrist, self._wrist_source_pixmap)
 
-    def _clear_camera_views(self):
+    def _clear_camera_views(self, message="未加载图像"):
         self._agent_source_pixmap = QPixmap()
         self._wrist_source_pixmap = QPixmap()
-        self.lbl_agent.setPixmap(QPixmap())
-        self.lbl_agent.setText("无画面")
-        self.lbl_wrist.setPixmap(QPixmap())
-        self.lbl_wrist.setText("无画面")
+        self.lbl_agent.clear_frame(message)
+        self.lbl_wrist.clear_frame(message)
 
     def load_demo(self):
         self.pause_playback()
         demo_name = self.demo_combo.currentData()
         if not demo_name or self.file_handle is None:
-            self._update_demo_navigation_buttons()
+            self.current_demo_group = None
+            self.current_demo_name = None
+            self.lbl_frame_info.setText("当前帧: 0 / 0")
+            self._set_status_label(self.lbl_crop_state, "未选择 demo")
+            self._clear_camera_views()
+            self.text_state.setPlainText("请选择一个 demo 序列。")
+            self._sync_command_state()
             return
 
-        self.current_demo_name = str(demo_name)
-        self.current_demo_group = self.file_handle["data"][demo_name]
+        try:
+            self.current_demo_name = str(demo_name)
+            self.current_demo_group = self.file_handle["data"][demo_name]
+        except Exception as exc:
+            self.current_demo_group = None
+            self.current_demo_name = None
+            self.lbl_frame_info.setText("当前帧: 0 / 0")
+            self._set_status_label(self.lbl_crop_state, "demo 加载失败", "status-danger")
+            self._clear_camera_views("demo 加载失败")
+            self.text_state.setPlainText(f"加载 demo 失败: {exc}")
+            self._sync_command_state()
+            return
+
         total_num_samples = self._infer_num_samples(self.current_demo_group)
         crop_start, crop_end = self._effective_crop_range(demo_name)
         num_samples = max(0, crop_end - crop_start)
@@ -991,11 +1164,13 @@ class HDF5ViewerDialog(QDialog):
         self.crop_end_spin.blockSignals(False)
 
         if demo_name in self.pending_crop_ranges:
-            self.lbl_crop_state.setText(f"当前 demo 待裁剪: {crop_start + 1} 到 {crop_end} 帧")
-            self.lbl_crop_state.setStyleSheet("color: #b26a00; font-weight: bold;")
+            self._set_status_label(
+                self.lbl_crop_state,
+                f"当前 demo 待裁剪: {crop_start + 1} 到 {crop_end} 帧",
+                "status-warning",
+            )
         else:
-            self.lbl_crop_state.setText("当前 demo 无待保存裁剪")
-            self.lbl_crop_state.setStyleSheet("color: #555;")
+            self._set_status_label(self.lbl_crop_state, "当前 demo 无待保存裁剪")
 
         if num_samples > 0:
             self.slider.blockSignals(True)
@@ -1009,13 +1184,13 @@ class HDF5ViewerDialog(QDialog):
             self.slider.setMaximum(0)
             self.slider.setValue(0)
             self.slider.blockSignals(False)
-            self._clear_camera_views()
-            self.text_state.setText("当前 demo 为空，无法预览。")
+            self._clear_camera_views("空序列")
+            self.text_state.setPlainText("当前 demo 为空，无法预览。")
 
-        self._update_demo_navigation_buttons()
+        self._sync_command_state()
 
     def toggle_play(self):
-        if self.current_demo_group is None:
+        if not self._has_current_frames():
             return
         if self.is_playing:
             self.pause_playback()
@@ -1023,19 +1198,21 @@ class HDF5ViewerDialog(QDialog):
             self.start_playback()
 
     def start_playback(self):
+        if not self._has_current_frames():
+            return
         if self.slider.value() >= self.slider.maximum():
             self.slider.setValue(0)
 
         self.is_playing = True
-        self.btn_play.setText("⏸ 暂停")
-        self.btn_play.setStyleSheet("font-weight: bold; color: red; min-width: 80px;")
+        self.btn_play.setText("暂停")
+        set_standard_icon(self.btn_play, QStyle.SP_MediaPause)
         self.change_speed()
 
     def pause_playback(self):
         self.is_playing = False
         self.playback_timer.stop()
-        self.btn_play.setText("▶ 播放")
-        self.btn_play.setStyleSheet("font-weight: bold; color: green; min-width: 80px;")
+        self.btn_play.setText("播放")
+        set_standard_icon(self.btn_play, QStyle.SP_MediaPlay)
 
     def change_speed(self):
         text = self.speed_combo.currentText().split()[0].replace("x", "")
@@ -1069,6 +1246,7 @@ class HDF5ViewerDialog(QDialog):
 
     def on_slider_changed(self):
         self.update_frame_display()
+        self._sync_command_state()
 
     def _read_obs_dataset(self, obs_group, candidates, source_idx):
         for name in candidates:
@@ -1129,29 +1307,50 @@ class HDF5ViewerDialog(QDialog):
         if self.current_demo_group is None:
             return
 
-        idx = self.slider.value()
-        total = self.slider.maximum() + 1
-        crop_start, _ = self._effective_crop_range(self.current_demo_name)
-        source_idx = crop_start + idx
-        self.lbl_frame_info.setText(f"当前帧: {idx + 1} / {total} | 原始帧: {source_idx + 1}")
-
         try:
-            agent_rgb = self.current_demo_group["obs"]["agentview_rgb"][source_idx]
-            wrist_rgb = self.current_demo_group["obs"]["eye_in_hand_rgb"][source_idx]
+            idx = self.slider.value()
+            total = self.slider.maximum() + 1
+            crop_start, _ = self._effective_crop_range(self.current_demo_name)
+            source_idx = crop_start + idx
+            self.lbl_frame_info.setText(
+                f"当前帧: {idx + 1} / {total} | 原始帧: {source_idx + 1}"
+            )
+
+            agent_rgb = np.ascontiguousarray(
+                self.current_demo_group["obs"]["agentview_rgb"][source_idx]
+            )
+            wrist_rgb = np.ascontiguousarray(
+                self.current_demo_group["obs"]["eye_in_hand_rgb"][source_idx]
+            )
+            if agent_rgb.ndim != 3 or agent_rgb.shape[2] != 3:
+                raise ValueError(f"全局相机图像形状无效: {agent_rgb.shape}")
+            if wrist_rgb.ndim != 3 or wrist_rgb.shape[2] != 3:
+                raise ValueError(f"手部相机图像形状无效: {wrist_rgb.shape}")
+
             agent_height, agent_width, agent_channels = agent_rgb.shape
             wrist_height, wrist_width, wrist_channels = wrist_rgb.shape
 
             agent_bytes_per_line = agent_channels * agent_width
-            qimg_agent = QImage(agent_rgb.data, agent_width, agent_height, agent_bytes_per_line, QImage.Format_RGB888)
-            self._agent_source_pixmap = QPixmap.fromImage(qimg_agent)
-            self.lbl_agent.setText("")
-            self._set_camera_pixmap(self.lbl_agent, self._agent_source_pixmap)
+            qimg_agent = QImage(
+                agent_rgb.data,
+                agent_width,
+                agent_height,
+                agent_bytes_per_line,
+                QImage.Format_RGB888,
+            ).copy()
+            agent_pixmap = QPixmap.fromImage(qimg_agent)
 
             wrist_bytes_per_line = wrist_channels * wrist_width
-            qimg_wrist = QImage(wrist_rgb.data, wrist_width, wrist_height, wrist_bytes_per_line, QImage.Format_RGB888)
-            self._wrist_source_pixmap = QPixmap.fromImage(qimg_wrist)
-            self.lbl_wrist.setText("")
-            self._set_camera_pixmap(self.lbl_wrist, self._wrist_source_pixmap)
+            qimg_wrist = QImage(
+                wrist_rgb.data,
+                wrist_width,
+                wrist_height,
+                wrist_bytes_per_line,
+                QImage.Format_RGB888,
+            ).copy()
+            wrist_pixmap = QPixmap.fromImage(qimg_wrist)
+            if agent_pixmap.isNull() or wrist_pixmap.isNull():
+                raise ValueError("图像转换失败")
 
             payload = self._get_frame_payload(source_idx)
             joints = payload["joints"]
@@ -1174,32 +1373,54 @@ class HDF5ViewerDialog(QDialog):
             actions_str = np.array2string(actions, formatter=formatter)
             ee_states_str = np.array2string(ee_states, formatter=formatter)
 
-            text = "【录制帧数据】\n"
-            text += f"格式: {schema_name}\n"
-            text += "-" * 25 + "\n"
-            text += f"► 关节位置 [6]:\n {joints_str}\n\n"
-            text += f"► 夹爪状态 [1]:\n {gripper_str}\n\n"
-            text += f"► 末端 XYZ [3]:\n {pos_str}\n\n"
-            text += f"► 末端 轴角 [3]:\n {ori_str}\n\n"
+            lines = [
+                "录制帧数据",
+                f"格式: {schema_name}",
+                "-" * 25,
+                "关节位置 [6]",
+                f" {joints_str}",
+                "",
+                "夹爪状态 [1]",
+                f" {gripper_str}",
+                "",
+                "末端 XYZ [3]",
+                f" {pos_str}",
+                "",
+                "末端轴角 [3]",
+                f" {ori_str}",
+                "",
+            ]
             if quat is not None:
                 quat_str = np.array2string(quat, formatter=formatter)
-                text += f"► 末端 四元数 [4]:\n {quat_str}\n\n"
-            text += f"► 末端状态 [6]:\n {ee_states_str}\n\n"
+                lines.extend(("末端四元数 [4]", f" {quat_str}", ""))
+            lines.extend(("末端状态 [6]", f" {ee_states_str}", ""))
             if robot_states is not None:
                 robot_states_str = np.array2string(robot_states, formatter=formatter)
-                text += f"► 机器人状态 [7]:\n {robot_states_str}\n\n"
+                lines.extend(("机器人状态 [7]", f" {robot_states_str}", ""))
             if dones is not None:
-                text += f"► done: {int(dones)}\n"
+                lines.append(f"done: {int(dones)}")
             if rewards is not None:
-                text += f"► reward: {float(rewards):.3f}\n"
+                lines.append(f"reward: {float(rewards):.3f}")
             if dones is not None or rewards is not None:
-                text += "\n"
-            text += "-" * 25 + "\n"
-            text += f"► 保存的 Action [7]:\n {actions_str}\n"
-            text += "  (VxVyVz, WxWyWz, Gripper)"
-            self.text_state.setText(text)
+                lines.append("")
+            lines.extend(
+                (
+                    "-" * 25,
+                    "保存的 Action [7]",
+                    f" {actions_str}",
+                    " (VxVyVz, WxWyWz, Gripper)",
+                )
+            )
+
+            self._agent_source_pixmap = agent_pixmap
+            self._wrist_source_pixmap = wrist_pixmap
+            self._set_camera_pixmap(self.lbl_agent, self._agent_source_pixmap)
+            self._set_camera_pixmap(self.lbl_wrist, self._wrist_source_pixmap)
+            self.text_state.setPlainText("\n".join(lines))
         except Exception as exc:
-            self.text_state.setText(f"读取帧数据失败: {exc}")
+            self.pause_playback()
+            self._clear_camera_views("帧读取失败")
+            self.text_state.setPlainText(f"读取帧数据失败: {exc}")
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1207,6 +1428,5 @@ class HDF5ViewerDialog(QDialog):
 
     def closeEvent(self, event):
         self.pause_playback()
-        if self.file_handle is not None:
-            self.file_handle.close()
+        self._close_file_handle()
         event.accept()

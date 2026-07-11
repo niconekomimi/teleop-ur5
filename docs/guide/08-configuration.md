@@ -88,6 +88,7 @@ GUI 的“遥操作设置”弹窗会把应用后的行为参数写回源码树�
 - 相机型号和 serial number 偏好
 - HDF5 输出目录和默认文件名
 - 本地 `Real_IL` 推理默认路径
+- 推理动作超时保护，默认由 `default_inference_action_timeout_sec` 配置
 - `openpi_remote` 的 host、port 和 prompt 默认值
 - `teleop_settings`：GUI 遥操作设置弹窗中的 joy / mediapipe / quest3 自定义方案、当前选中方案和默认方案
 

@@ -10,6 +10,7 @@ log/
 .ruff_cache/
 .coverage
 htmlcov/
+artifacts/
 Real_IL/
 openpi/
 scripts/benchmark_real_robot_replan.py

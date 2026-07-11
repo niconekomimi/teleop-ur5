@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import TYPE_CHECKING, Mapping, Optional
 
-from ..device_manager.backends.interfaces import ArmBackend, GripperBackend
 from .models import ActionCommand, ControlSource
 from .mux import ActionMux, MuxDispatchResult
 from .orchestrator import OrchestratorState, SystemOrchestrator, TransitionDecision
+
+if TYPE_CHECKING:
+    from ..device_manager.backends.interfaces import ArmBackend, GripperBackend
 
 
 class ControlCoordinator:

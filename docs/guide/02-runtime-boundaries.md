@@ -1,6 +1,6 @@
 # 运行边界与职责
 
-更新时间：2026-05-06
+更新时间：2026-07-11
 
 本文按运行角色说明项目职责分工和功能边界。它回答“某个功能适合放在哪一层、由哪个模块负责、与哪些模块协作”。
 
@@ -9,6 +9,9 @@
 主要文件：
 
 - `teleop_control_py/gui/main_window.py`
+- `teleop_control_py/gui/controllers/camera_selection.py`
+- `teleop_control_py/gui/dialogs/teleop_settings.py`
+- `teleop_control_py/gui/panels/`
 - `teleop_control_py/gui/app_service.py`
 - `teleop_control_py/gui/intent_controller.py`
 - `teleop_control_py/gui/runtime_facade.py`
@@ -19,13 +22,19 @@
 
 职责：
 
-- `main_window.py` 负责控件、布局、用户操作和状态渲染。
+- `main_window.py` 负责控件装配、布局、用户操作和状态渲染。
+- `gui/controllers/` 负责不涉及 ROS 运行时的控件协调逻辑；相机控制器统一处理 SDK 设备发现、选择、MediaPipe 话题映射、占用状态和 GUI 偏好快照。
+- `gui/dialogs/` 负责可独立创建和测试的设置对话框；配置读写通过存储接口接入，长设置页使用滚动容器适配小屏幕。
+- `gui/panels/` 负责可独立实例化的系统控制、状态总览、数据录制和模型推理面板；面板只构建 Qt 控件，命令信号和运行编排仍由主窗口负责。
+- `gui/panels/workspace.py` 和 `gui/theme.py` 负责双列滚动工作区、顶部状态栏与统一视觉语义；它们不导入 ROS、设备管理或运行服务。
 - `GuiAppService` 负责 GUI 侧运行编排，包括启动驱动、遥操作、采集、Home、录制和推理执行。
 - `GuiIntentController` 在 GUI 层复用协调器规则，用于提前拦截冲突操作。
 - `GuiRuntimeFacade` 汇总进程状态、硬件探测、相机可用性和 GUI 可消费的运行时快照。
 - `ROS2Worker` 是 GUI 的 ROS 桥，负责订阅状态、调用服务，并在推理执行期间创建本地控制后端。
 - `HttpPreviewWorker` 轮询采集节点 Preview API，把 HTTP/JPEG 预览转给 GUI。
 - `PreviewRecordingWorker` 从当前预览源写本地 `mp4`，不参与 HDF5 数据集录制。
+
+因此，替换 GUI 时应保留主窗口对下层服务的调用契约，界面布局、主题、控件组织和状态呈现可以独立替换。`scripts/render_gui_preview.py` 使用纯 Qt 假状态做离屏视觉回归，不代表真实 ROS 或硬件状态。
 
 适合由服务层、节点或 core 承担的职责：
 

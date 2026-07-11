@@ -3,10 +3,12 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from .main_window import TeleopMainWindow
+from .theme import configure_application
 
 
 def main() -> int:
     app = QApplication(sys.argv)
+    configure_application(app)
     window = TeleopMainWindow()
     window.show()
     exit_code = 0

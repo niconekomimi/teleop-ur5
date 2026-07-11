@@ -48,6 +48,7 @@ class GuiSettings:
     default_inference_embedding_path: str
     default_inference_device: str
     default_inference_hz: float
+    default_inference_action_timeout_sec: float
     default_openpi_host: str
     default_openpi_port: int
     default_openpi_prompt: str
@@ -300,6 +301,10 @@ def load_gui_settings(current_file: str | Path) -> GuiSettings:
         default_inference_embedding_path=str(raw.get("default_inference_embedding_path", "")),
         default_inference_device=str(raw.get("default_inference_device", "cuda")).strip().lower() or "cuda",
         default_inference_hz=float(raw.get("default_inference_hz", 10.0)),
+        default_inference_action_timeout_sec=max(
+            0.05,
+            float(raw.get("default_inference_action_timeout_sec", 0.25)),
+        ),
         default_openpi_host=str(raw.get("default_openpi_host", "127.0.0.1")).strip() or "127.0.0.1",
         default_openpi_port=_as_int(raw.get("default_openpi_port", 18000), 18000),
         default_openpi_prompt=str(raw.get("default_openpi_prompt", "")).strip(),

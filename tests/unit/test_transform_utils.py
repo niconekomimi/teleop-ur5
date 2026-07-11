@@ -2,16 +2,9 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import numpy as np
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src/teleop_control_py"))
-
-from teleop_control_py.utils.transform_utils import (  # noqa: E402
+from teleop_control_py.utils.transform_utils import (
     apply_deadzone,
     axis_mapping_sign_to_rotation_matrix,
     clip_rotvec_magnitude,

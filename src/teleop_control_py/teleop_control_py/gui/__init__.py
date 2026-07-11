@@ -1,16 +1,9 @@
 """GUI package for teleop_control_py."""
 
-from .app import main
-from .app_service import (
-    CollectorLaunchConfig,
-    GuiAppService,
-    RobotDriverLaunchConfig,
-    RosWorkerCallbacks,
-    RosWorkerConfig,
-    TeleopLaunchConfig,
-)
-from .intent_controller import GuiIntentController, IntentResult
-from .runtime_facade import GuiRuntimeFacade, RuntimeSnapshot
+from __future__ import annotations
+
+from importlib import import_module
+from typing import Any
 
 __all__ = [
     "main",
@@ -25,3 +18,30 @@ __all__ = [
     "GuiRuntimeFacade",
     "RuntimeSnapshot",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "main":
+        module = import_module(".app", __name__)
+        return getattr(module, name)
+    if name in {
+        "CollectorLaunchConfig",
+        "GuiAppService",
+        "RobotDriverLaunchConfig",
+        "RosWorkerCallbacks",
+        "RosWorkerConfig",
+        "TeleopLaunchConfig",
+    }:
+        module = import_module(".app_service", __name__)
+        return getattr(module, name)
+    if name in {"GuiIntentController", "IntentResult"}:
+        module = import_module(".intent_controller", __name__)
+        return getattr(module, name)
+    if name in {"GuiRuntimeFacade", "RuntimeSnapshot"}:
+        module = import_module(".runtime_facade", __name__)
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

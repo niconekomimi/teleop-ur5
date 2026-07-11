@@ -7,6 +7,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
@@ -56,19 +57,36 @@ class HDF5WriterThread(threading.Thread):
         self._flush_every_n = max(1, int(flush_every_n))
         self._logger = logger
 
-        self._stop_evt = threading.Event()
+        self._stop_lock = threading.Lock()
+        self._close_enqueued = False
+        self._closed_evt = threading.Event()
+        self._fatal_error: Optional[BaseException] = None
         self._h5: Optional[h5py.File] = None
         self._data_group: Optional[h5py.Group] = None
         self._current_demo: Optional[str] = None
         self._demo_handles: Dict[str, Dict[str, object]] = {}
         self._demo_counts: Dict[str, int] = {}
 
-    def stop(self) -> None:
-        self._stop_evt.set()
-        try:
-            self._queue.put_nowait(Command(kind="close"))
-        except queue.Full:
-            pass
+    @property
+    def fatal_error(self) -> Optional[BaseException]:
+        return self._fatal_error
+
+    def stop(self, timeout_sec: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, float(timeout_sec))
+        with self._stop_lock:
+            if self._close_enqueued or self._closed_evt.is_set():
+                return True
+            while self.is_alive():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                try:
+                    self._queue.put(Command(kind="close"), timeout=min(0.1, remaining))
+                    self._close_enqueued = True
+                    return True
+                except queue.Full:
+                    continue
+            return self._closed_evt.is_set()
 
     def _log(self, level: str, msg: str) -> None:
         if self._logger is not None:
@@ -248,7 +266,7 @@ class HDF5WriterThread(threading.Thread):
         pending_demo: Optional[str] = None
 
         try:
-            while not self._stop_evt.is_set():
+            while True:
                 try:
                     item = self._queue.get(timeout=0.25)
                 except queue.Empty:
@@ -316,6 +334,7 @@ class HDF5WriterThread(threading.Thread):
                 self._finalize_demo(self._current_demo)
 
         except Exception as exc:  # noqa: BLE001
+            self._fatal_error = exc
             self._log("error", f"HDF5 writer thread crashed: {exc!r}")
         finally:
             try:
@@ -325,4 +344,8 @@ class HDF5WriterThread(threading.Thread):
                     self._h5.flush()
                     self._h5.close()
             except Exception as exc:  # noqa: BLE001
+                if self._fatal_error is None:
+                    self._fatal_error = exc
                 self._log("error", f"HDF5 writer thread close failed: {exc!r}")
+            finally:
+                self._closed_evt.set()

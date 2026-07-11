@@ -61,14 +61,21 @@ class RecorderService:
         except Exception:
             return -1
 
+    def _put_control(self, command: Command, timeout_sec: float = 2.0) -> bool:
+        if not self._writer.is_alive() or self._writer.fatal_error is not None:
+            return False
+        try:
+            self._queue.put(command, timeout=max(0.0, float(timeout_sec)))
+            return True
+        except queue.Full:
+            return False
+
     def start_demo(self) -> tuple[bool, str, Optional[str]]:
         with self._lock:
             if self._recording:
                 return False, 'Already recording', self._current_demo_name
             demo_name = f'demo_{self._demo_index}'
-            try:
-                self._queue.put_nowait(Command(kind='start_demo', demo_name=demo_name))
-            except queue.Full:
+            if not self._put_control(Command(kind='start_demo', demo_name=demo_name)):
                 return False, 'Queue full; cannot start demo', None
             self._recording = True
             self._current_demo_name = demo_name
@@ -80,12 +87,10 @@ class RecorderService:
             if not self._recording or self._current_demo_name is None:
                 return False, 'Not recording', None
             demo_name = self._current_demo_name
+            if not self._put_control(Command(kind='stop_demo', demo_name=demo_name)):
+                return False, 'Queue full; cannot stop demo', demo_name
             self._recording = False
             self._current_demo_name = None
-        try:
-            self._queue.put_nowait(Command(kind='stop_demo', demo_name=demo_name))
-        except queue.Full:
-            self._log('warn', 'Recorder queue full while stopping demo; metadata will be finalized on close.')
         return True, f'Stopped recording {demo_name}', demo_name
 
     def discard_last_demo(self) -> tuple[bool, str, Optional[str]]:
@@ -95,34 +100,41 @@ class RecorderService:
             if self._demo_index <= 0:
                 return False, 'No demo to discard', None
             demo_name = f'demo_{self._demo_index - 1}'
-            try:
-                self._queue.put_nowait(Command(kind='discard_demo', demo_name=demo_name))
-            except queue.Full:
+            if not self._put_control(Command(kind='discard_demo', demo_name=demo_name)):
                 return False, 'Queue full; cannot discard demo', None
             self._demo_index -= 1
             return True, f'Discarded {demo_name}', demo_name
 
     def enqueue_sample(self, sample: Sample) -> bool:
+        if not self._writer.is_alive() or self._writer.fatal_error is not None:
+            return False
         try:
             self._queue.put_nowait(sample)
             return True
         except queue.Full:
             return False
 
-    def close(self) -> None:
+    def close(self, timeout_sec: float = 10.0) -> bool:
         try:
             if self.recording:
-                self.stop_demo()
-        except Exception:
-            pass
-        try:
-            self._writer.stop()
-        except Exception:
-            pass
-        try:
-            self._writer.join(timeout=2.0)
-        except Exception:
-            pass
+                stopped, message, _demo_name = self.stop_demo()
+                if not stopped:
+                    self._log('error', message)
+        except Exception as exc:
+            self._log('error', f'Failed to stop active demo during close: {exc!r}')
+
+        close_enqueued = self._writer.stop(timeout_sec=min(5.0, max(0.0, timeout_sec)))
+        if not close_enqueued:
+            self._log('error', 'Timed out while queueing HDF5 writer close command.')
+
+        self._writer.join(timeout=max(0.0, float(timeout_sec)))
+        if self._writer.is_alive():
+            self._log('error', 'Timed out while draining the HDF5 writer queue.')
+            return False
+        if self._writer.fatal_error is not None:
+            self._log('error', f'HDF5 writer failed: {self._writer.fatal_error!r}')
+            return False
+        return close_enqueued
 
     def _log(self, level: str, message: str) -> None:
         if self._logger is None:
